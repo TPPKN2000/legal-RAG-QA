@@ -1,0 +1,15 @@
+[
+    {
+        "case_id": "case_4101", // must exist in the test set
+        "prediction": "A_WIN", // A_WIN | B_WIN | PARTIAL_A_WIN | PARTIAL_B_WIN
+        "case_evidence": [
+            "case_4101_chunk_3"
+        ], // case segment ids  (required, may be [])
+        "law_evidence": [ // law provisions from the corpus
+            {
+                "law_id": "47/2010/QH12",
+                "aid": 270
+            } // aid = the article's aid in corpus_law_pub.json
+        ]
+    }
+]
