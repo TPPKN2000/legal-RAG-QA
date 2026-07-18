@@ -1,0 +1,25 @@
+pydantic>=2.6
+python-dotenv>=1.0
+requests>=2.31
+
+# Embedding / reranking
+sentence-transformers>=3.0
+torch>=2.2
+
+# Generation (HF transformers in-process, per confirmed setup)
+transformers>=4.44
+accelerate>=0.30
+
+# Retrieval
+rank_bm25>=0.2.2
+tiktoken>=0.7
+
+# Vector store
+pinecone>=5.0
+
+# Prompt compression (optional; falls back to sentence truncation if absent)
+llmlingua>=0.2.2
+
+# Ingestion of supplementary law documents
+python-docx>=1.1
+pdfplumber>=0.11

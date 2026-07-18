@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 
-from backend.model import generate_text
+from backend.models import generate_text
 
 _REWRITE_SYSTEM_PROMPT = (
     "Bạn là trợ lý pháp lý. Nhiệm vụ: viết lại câu hỏi/tình huống sau đây thành "
