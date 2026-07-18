@@ -12,12 +12,41 @@ from completely dominating the fused ranking.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from backend import config
 from backend.indexing import bm25_index, vector_store
 from backend.models import RetrievedChunk
 from backend.retrieval.querry_transform import generate_hyde, rewrite_query
+
+log = logging.getLogger(__name__)
+
+# Cached after the first attempt so we don't retry a doomed Pinecone call on
+# every single query in a run (e.g. --limit 50 over a test set) — quick
+# trial runs without PINECONE_API_KEY set should degrade to BM25-only once,
+# not print/retry a warning per query.
+_vector_store_available: Optional[bool] = None
+
+
+def _vector_query_safe(text: str, top_k: int, law_id: Optional[str], require_active: bool) -> list[RetrievedChunk]:
+    """Wraps vector_store.query so hybrid_search still works BM25-only when
+    Pinecone isn't configured yet (e.g. a quick trial run on Colab before
+    setting up PINECONE_API_KEY / running scripts.build_index)."""
+    global _vector_store_available
+    if _vector_store_available is False:
+        return []
+    try:
+        return vector_store.query(text, top_k=top_k, law_id=law_id, require_active=require_active)
+    except Exception as e:
+        if _vector_store_available is None:
+            log.warning(
+                "Pinecone vector search unavailable (%s) — falling back to BM25-only "
+                "retrieval for the rest of this run. Set PINECONE_API_KEY and run "
+                "`python -m scripts.build_index` to enable hybrid search.", e,
+            )
+        _vector_store_available = False
+        return []
 
 
 def _rrf_fuse(result_lists: list[list[RetrievedChunk]], k: int = config.RRF_K) -> list[RetrievedChunk]:
@@ -72,14 +101,14 @@ def hybrid_search(
             bm25.query(q, top_k=config.BM25_TOP_K, law_id=law_id, require_active=require_active)
         )
         result_lists.append(
-            vector_store.query(q, top_k=config.VECTOR_TOP_K, law_id=law_id, require_active=require_active)
+            _vector_query_safe(q, top_k=config.VECTOR_TOP_K, law_id=law_id, require_active=require_active)
         )
 
     if use_hyde:
         hyde_text = generate_hyde(query)
         if hyde_text:
             result_lists.append(
-                vector_store.query(hyde_text, top_k=config.VECTOR_TOP_K, law_id=law_id,
+                _vector_query_safe(hyde_text, top_k=config.VECTOR_TOP_K, law_id=law_id,
                                     require_active=require_active)
             )
 
