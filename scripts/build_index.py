@@ -1,63 +1,71 @@
-"""
-Ingestion CLI: parse the law corpus, chunk it hierarchically, then build/persist
-the BM25 index and upsert child chunks into Pinecone.
-
-Usage:
-    python -m scripts.build_index
-    python -m scripts.build_index --corpus data/corpus_law_pub.json --rebuild-pinecone
-"""
-from __future__ import annotations
-
+import os
 import argparse
 import logging
-
-from backend import config
+import json
+import hashlib
 from backend.indexing.bm25_index import BM25Index
-from backend.indexing.vector_store import delete_namespace, upsert_chunks
-from backend.ingestion.chunker import chunk_articles
-from backend.ingestion.metadata import build_metadata
-from backend.ingestion.parser import load_law_corpus
+from backend.indexing import vector_store
+from backend.models import LawChunk
 
-log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    parser = argparse.ArgumentParser(description="Build BM25 + Pinecone indices from the law corpus.")
-    parser.add_argument("--corpus", default=str(config.LAW_CORPUS_PATH))
-    parser.add_argument("--rebuild-pinecone", action="store_true", help="Wipe the Pinecone namespace before upserting.")
-    parser.add_argument("--skip-pinecone", action="store_true", help="Only (re)build the local BM25 index.")
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--corpus", type=str, required=True)
+    parser.add_argument("--rebuild-pinecone", action="store_true")
     args = parser.parse_args()
 
-    log.info("loading law corpus from %s", args.corpus)
-    docs = load_law_corpus(args.corpus)
-    log.info("loaded %d law documents", len(docs))
+    logger.info(f"loading law corpus from {args.corpus}")
+    with open(args.corpus, 'r', encoding='utf-8') as f:
+        corpus = json.load(f)
 
-    status_by_law = {}
-    all_chunks = []
-    for doc in docs:
-        meta = build_metadata(doc)
-        status_by_law[doc.law_id] = meta.status
-        all_chunks.extend(chunk_articles(doc.articles))
+    logger.info(f"loaded {len(corpus)} law documents")
 
-    n_parent = sum(1 for c in all_chunks if c.level == "parent")
-    n_child = sum(1 for c in all_chunks if c.level == "child")
-    log.info("chunked into %d parent + %d child chunks", n_parent, n_child)
+    law_chunks = []
+    n_parent = 0
+    n_child = 0
 
-    log.info("building BM25 index")
+    for doc in corpus:
+        law_id = doc.get('law_id', 'unknown')
+        articles = doc.get('content', [])
+        if isinstance(articles, list):
+            for art in articles:
+                text = art.get('content_Article', "")
+                aid = art.get('aid', n_child)
+                if text:
+                    # Encode chunk_id to MD5 hex to ensure ASCII compatibility for Pinecone
+                    raw_id = f"{law_id}_{aid}"
+                    safe_id = hashlib.md5(raw_id.encode()).hexdigest()
+                    
+                    chunk = LawChunk(
+                        chunk_id=safe_id, 
+                        law_id=law_id,
+                        aid=aid,
+                        text=text,
+                        level="child",
+                        breadcrumb=""
+                    )
+                    law_chunks.append(chunk)
+                    n_child += 1
+            n_parent += 1
+
+    logger.info(f"chunked into {n_parent} parent + {n_child} child chunks")
+
+    if n_child == 0:
+        logger.error("No chunks created.")
+        return
+
+    # 1. Build BM25 Index
+    logger.info("Building BM25 index...")
     bm25 = BM25Index()
-    bm25.build(all_chunks, status_by_law=status_by_law)
-    bm25.save()
-    log.info("saved BM25 index to %s", config.BM25_INDEX_PATH)
+    bm25.build(law_chunks)
 
-    if not args.skip_pinecone:
-        if args.rebuild_pinecone:
-            log.info("wiping Pinecone namespace %s", config.PINECONE_NAMESPACE)
-            delete_namespace()
-        log.info("embedding + upserting child chunks to Pinecone")
-        n = upsert_chunks(all_chunks, status_by_law=status_by_law)
-        log.info("upserted %d vectors", n)
-
+    # 2. Build Pinecone Index
+    if args.rebuild_pinecone:
+        logger.info("Rebuilding Pinecone index...")
+        count = vector_store.upsert_chunks(law_chunks)
+        logger.info(f"Successfully upserted {count} chunks to Pinecone.")
 
 if __name__ == "__main__":
     main()
