@@ -85,6 +85,8 @@ def main():
     parser.add_argument("-n", "--num-cases", type=int, default=None, help="Only test N cases (random sample)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--out", default=None, help="Output submission path")
+    parser.add_argument("--offline", action="store_true", help="Skip Case Content API entirely (no ALQAC_TOKEN needed); "
+                          "only evaluates OutcomeAccuracy + Law F1.")
     args = parser.parse_args()
 
     from backend import config
@@ -96,11 +98,25 @@ def main():
     # --- pre-flight checks -------------------------------------------------
     # Fail fast and loudly instead of burning ~2h to produce 50x B_WIN
     # fallback, like the legalAI_test.ipynb run did.
-    if not config.ALQAC_TOKEN:
-        sys.exit(
-            "ALQAC_TOKEN is not set (backend.config.ALQAC_TOKEN is empty).\n"
-            "Set it in .env or `export ALQAC_TOKEN=alqac_...` before running."
-        )
+    if args.offline:
+        log.info("Offline mode: stubbing out Case Content API (no ALQAC_TOKEN required).")
+
+        def _stub_retrieve(query: str, case_id: str):
+            # Count the call so budget/logging logic in pipeline.py still works,
+            # but never hit the network.
+            case_api_client._calls_per_case[case_id] += 1
+            return None
+
+        case_api_client.retrieve = _stub_retrieve
+    else:
+        if not config.ALQAC_TOKEN:
+            sys.exit(
+                "ALQAC_TOKEN is not set (backend.config.ALQAC_TOKEN is empty).\n"
+                "Set it in .env or `export ALQAC_TOKEN=alqac_...` before running."
+            )
+
+    from backend.pipeline import process_case  # import after stubbing
+
     if not config.BM25_INDEX_PATH.exists():
         sys.exit(
             f"{config.BM25_INDEX_PATH} not found.\n"
