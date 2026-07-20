@@ -6,7 +6,7 @@ import hashlib
 from backend.indexing.bm25_index import BM25Index
 from backend.indexing import vector_store
 from backend.models import LawChunk
-from bạckend import config
+from backend import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
