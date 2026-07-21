@@ -1,20 +1,28 @@
 """
-Pre-retrieval query transformation (design doc §2.1, §2.3).
+Pre-retrieval query transformation (design doc §2.1, §2.3;
+legalrag_adjustments.md §3).
 
 - rewrite_query(): turns colloquial language into legal-register variants
   (3-5 paraphrases) so BM25/vector search hit the terms actually used in
   statutes.
-- generate_hyde(): asks the LLM to draft a hypothetical answer/provision
-  text, then embeds *that* for vector search — text-to-text matches the
-  dense embedding space better than question-to-text.
+- decompose_query(): asks the LLM to list distinct legal *aspects* that need
+  looking up (e.g. the disputed legal relationship, contract-validity
+  conditions, statute of limitations) as short standalone questions — NOT to
+  draft hypothetical statute text.
 
-Both are logged by the caller (see pipeline.py) since HyDE in particular can
-hallucinate legal-sounding but incorrect content; hybrid search with BM25
-is the safety net, not this module.
+HyDE (generate_hyde) has been REMOVED. It asked the LLM to draft a passage
+"in the style of" a law provision or court finding and then embedded that
+generated text for vector search. design_doc §2.3 already flagged the risk
+(the LLM can produce legal-sounding but incorrect content that then steers
+retrieval), and that risk gets worse, not better, on a much smaller
+generation model. decompose_query replaces it: it only asks for short,
+generic *aspect* questions ("what governs contract validity here?"), never
+statute-styled prose, which keeps hallucinated legal content out of the
+retrieval query entirely. See backend/retrieval/hybrid_search.py for how the
+decomposed sub-queries are fused (weighted RRF, Judge-R1-style) with the
+standard BM25/vector routes.
 """
 from __future__ import annotations
-
-import re
 
 from backend.models import generate_text
 
@@ -26,12 +34,12 @@ _REWRITE_SYSTEM_PROMPT = (
     "không đánh số, không giải thích thêm."
 )
 
-_HYDE_SYSTEM_PROMPT = (
-    "Bạn là trợ lý pháp lý. Với tình huống pháp lý sau, hãy viết một đoạn văn "
-    "ngắn (3-5 câu) mô phỏng văn phong một điều khoản pháp luật hoặc phần "
-    "nhận định của tòa án liên quan đến tình huống này. Đây CHỈ dùng để hỗ trợ "
-    "tìm kiếm, không phải câu trả lời cuối cùng, nên không cần chính xác tuyệt "
-    "đối, chỉ cần đúng văn phong và các thuật ngữ pháp lý liên quan."
+_DECOMPOSE_SYSTEM_PROMPT = (
+    "Bạn là trợ lý pháp lý. Cho tình huống dưới đây, hãy liệt kê 3-4 khía cạnh pháp lý "
+    "riêng biệt cần tra cứu (ví dụ: quan hệ pháp luật tranh chấp, điều kiện có hiệu lực "
+    "của hợp đồng/giao dịch, thời hiệu khởi kiện, nghĩa vụ chứng minh). "
+    "Mỗi khía cạnh viết thành MỘT câu hỏi ngắn, không đánh số, không giải thích thêm, "
+    "KHÔNG được tự bịa nội dung điều luật cụ thể — chỉ nêu khía cạnh cần tra."
 )
 
 
@@ -56,19 +64,28 @@ def rewrite_query(query: str, n_variants: int = 4, max_new_tokens: int = 256) ->
     return [query] + variants if variants else [query]
 
 
-def generate_hyde(query: str, max_new_tokens: int = 200) -> str | None:
-    """Generate a hypothetical legal passage for HyDE-style embedding search.
+def decompose_query(
+    query: str,
+    masked_query: str | None = None,
+    n_subqueries: int = 4,
+    max_new_tokens: int = 200,
+) -> list[str]:
+    """Replacement for generate_hyde(): decompose the case query into the
+    distinct legal aspects that need to be looked up, as short standalone
+    questions. Never generates hypothetical statute text (see module
+    docstring for why HyDE was removed).
 
-    Returns None on failure so callers can gracefully skip the HyDE branch.
+    Returns [] on failure or if generation produced nothing usable — callers
+    should treat that as "skip the decomposition route", not as an error.
     """
     try:
-        text = generate_text(
-            system_prompt=_HYDE_SYSTEM_PROMPT,
-            user_prompt=query,
+        raw = generate_text(
+            system_prompt=_DECOMPOSE_SYSTEM_PROMPT,
+            user_prompt=masked_query or query,
             max_new_tokens=max_new_tokens,
-            temperature=0.8,
+            temperature=0.5,
         )
-        text = re.sub(r"\s+", " ", text).strip()
-        return text or None
     except Exception:
-        return None
+        return []
+    lines = [l.strip("-•\t ") for l in raw.splitlines() if l.strip()]
+    return [l for l in lines if len(l) > 5][:n_subqueries]
