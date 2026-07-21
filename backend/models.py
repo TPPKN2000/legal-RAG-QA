@@ -133,7 +133,27 @@ class SubmissionRecord(BaseModel):
 def _get_generation_model():
     """Load the causal LM + tokenizer once and cache them for the process
     lifetime. HF `transformers` is loaded in-process per the confirmed
-    choice (no vLLM/Ollama server hop)."""
+    choice (no vLLM/Ollama server hop).
+
+    legalrag_adjustments.md §2 — safety notes for the <1B generation model
+    (previously Qwen3-8B, now config.GENERATION_MODEL_NAME, confirmed
+    Qwen3.5-0.8B-class):
+      - No `device_map`: that kwarg exists to shard a large model across
+        multiple GPUs and is unnecessary (and a source of version-dependent
+        accelerate/transformers errors) for a sub-1B model. Load normally
+        and `.to(device)`.
+      - `dtype` vs `torch_dtype`: transformers is mid-deprecation between the
+        two kwarg names across versions; try the new name first and fall
+        back to the old one rather than hard-coding either.
+      - Explicit `attn_implementation="sdpa"`: avoids an import-time crash if
+        transformers auto-selects flash-attention-2 but `flash-attn` isn't
+        installed. sdpa ships with torch itself.
+      - Loud failure if `tokenizer.chat_template` is missing, which usually
+        means the configured repo id points at a base (non-chat) checkpoint
+        rather than an "-Instruct"/"-Chat" one — much clearer than the
+        AttributeError that would otherwise surface deep inside
+        `apply_chat_template`.
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -141,14 +161,27 @@ def _get_generation_model():
     if device.startswith("cuda") and not torch.cuda.is_available():
         device = "cpu"
 
-    tokenizer = AutoTokenizer.from_pretrained(config.GENERATION_MODEL_NAME)
-    model = AutoModelForCausalLM.from_pretrained(
-        config.GENERATION_MODEL_NAME,
-        torch_dtype=torch.float16 if device.startswith("cuda") else torch.float32,
-        device_map=device if device.startswith("cuda") else None,
-    )
-    if not device.startswith("cuda"):
-        model = model.to(device)
+    tokenizer = AutoTokenizer.from_pretrained(config.GENERATION_MODEL_NAME, trust_remote_code=True)
+    if tokenizer.chat_template is None:
+        raise RuntimeError(
+            f"{config.GENERATION_MODEL_NAME} has no chat_template — check that "
+            "GENERATION_MODEL_NAME points at an '-Instruct'/'-Chat' checkpoint, "
+            "not a base model."
+        )
+
+    dtype_val = torch.float16 if device.startswith("cuda") else torch.float32
+    load_kwargs = dict(trust_remote_code=True, attn_implementation=config.GENERATION_ATTN_IMPL)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            config.GENERATION_MODEL_NAME, dtype=dtype_val, **load_kwargs
+        )
+    except TypeError:
+        # Older transformers versions don't accept `dtype=` yet.
+        model = AutoModelForCausalLM.from_pretrained(
+            config.GENERATION_MODEL_NAME, torch_dtype=dtype_val, **load_kwargs
+        )
+
+    model = model.to(device)  # no device_map for a sub-1B model
     model.eval()
     return tokenizer, model, device
 
@@ -156,18 +189,18 @@ def _get_generation_model():
 def generate_text(
     system_prompt: str,
     user_prompt: str,
-    max_new_tokens: int = 512,
+    max_new_tokens: int = config.GENERATION_MAX_NEW_TOKENS_DEFAULT,
     temperature: float = 0.3,
     top_p: float = 0.9,
 ) -> str:
-    """Single-turn chat-style generation used by query rewriting, HyDE, and
-    final verdict generation. Uses the tokenizer's chat template so it works
-    consistently across Qwen3-8B / Qwen3-4B without hand-rolled prompt
-    formatting for each swap.
+    """Single-turn chat-style generation used by query rewriting, NER-grounded
+    query decomposition, the case-fact digest step, and final verdict
+    generation. Uses the tokenizer's chat template so it works consistently
+    across Qwen3.x checkpoints without hand-rolled prompt formatting.
 
     Raises on failure (deliberately) — callers that must degrade gracefully
-    (e.g. HyDE, query rewriting) already wrap this in try/except; callers
-    that cannot degrade (outcome prediction) should let it propagate.
+    (query rewriting, query decomposition) already wrap this in try/except;
+    callers that cannot degrade (outcome prediction) should let it propagate.
     """
     import torch
 
@@ -177,9 +210,18 @@ def generate_text(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    input_ids = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, return_tensors="pt"
-    ).to(device)
+    template_kwargs = dict(add_generation_prompt=True, return_tensors="pt")
+    try:
+        # legalrag_adjustments.md §2 point 3: Qwen3-family chat templates
+        # default "thinking" mode on, which can burn the whole
+        # max_new_tokens budget on a <think>...</think> block before any
+        # JSON is emitted. Explicitly disable it (config-controlled).
+        input_ids = tokenizer.apply_chat_template(
+            messages, enable_thinking=config.GENERATION_ENABLE_THINKING, **template_kwargs
+        ).to(device)
+    except TypeError:
+        # Non-Qwen3 tokenizer/template that doesn't accept enable_thinking.
+        input_ids = tokenizer.apply_chat_template(messages, **template_kwargs).to(device)
 
     do_sample = temperature > 0
     with torch.no_grad():
@@ -193,4 +235,9 @@ def generate_text(
         )
 
     new_tokens = output[0][input_ids.shape[-1]:]
-    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    text = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    # Defensive cleanup in case a <think> block still leaks through (e.g. the
+    # enable_thinking kwarg was silently ignored by a particular checkpoint).
+    if "<think>" in text and "</think>" in text:
+        text = text.split("</think>", 1)[1].strip()
+    return text
