@@ -29,23 +29,38 @@ citation-precise child text before it reaches the final generation prompt.
 """
 from __future__ import annotations
 
+import importlib.util
 import re
-from dataclasses import dataclass
+import unicodedata
 
 from backend import config
 from backend.ingestion.parser import RawArticle, split_article_into_khoan_diem
 from backend.models import LawChunk
 
-try:
-    import tiktoken
-    _ENC = tiktoken.get_encoding("cl100k_base")
 
-    def _count_tokens(text: str) -> int:
-        return len(_ENC.encode(text))
-except ImportError:
-    def _count_tokens(text: str) -> int:
-        # Rough fallback: ~1 token per 3-4 Vietnamese UTF-8 characters.
-        return max(1, len(text) // 4)
+def _fallback_count_tokens(text: str) -> int:
+    # Rough fallback: ~1 token per 3-4 Vietnamese UTF-8 characters.
+    return max(1, len(text) // 4)
+  
+
+def _load_token_encoder():
+    if importlib.util.find_spec("tiktoken") is None:
+        return None
+      
+    import tiktoken
+    try:
+        return tiktoken.get_encoding("cl100k_base")
+    except Exception:
+        return None
+
+
+_ENC = _load_token_encoder()
+
+
+def _count_tokens(text: str) -> int:
+    if _ENC is None:
+        return _fallback_count_tokens(text)
+    return len(_ENC.encode(text))
 
 
 # Sentence-boundary split used only as a soft-split fallback for oversized
@@ -78,6 +93,20 @@ def _soft_split_oversized(text: str, max_chars: int = config.CHILD_MAX_CHARS) ->
     if buf:
         parts.append(buf.strip())
     return parts or [text]
+  
+
+def _ascii_id(value: str) -> str:
+    """Return an ASCII-only identifier component safe for Pinecone vector IDs.
+
+    Pinecone rejects vector IDs containing non-ASCII characters. Vietnamese
+    law IDs commonly include characters such as "Đ" in "NĐ-CP", so chunk
+    identifiers must be normalized before they are used as vector IDs.
+    """
+    value = value.replace("Đ", "D").replace("đ", "d")
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_value = re.sub(r"[^A-Za-z0-9_.-]+", "-", ascii_value)
+    return ascii_value.strip("-") or "chunk"
 
 
 def _breadcrumb(law_id: str, chuong: str | None, muc: str | None, aid: int,
@@ -99,7 +128,8 @@ def chunk_article(article: RawArticle) -> list[LawChunk]:
     """Produce one parent chunk + N child chunks for a single article."""
     chunks: list[LawChunk] = []
 
-    parent_id = f"{article.law_id}_a{article.aid}"
+    law_id_for_chunk_id = _ascii_id(article.law_id)
+    parent_id = f"{law_id_for_chunk_id}_a{article.aid}"
     parent_text = (article.title + "\n" + article.body).strip()
     chunks.append(
         LawChunk(
