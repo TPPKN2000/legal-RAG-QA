@@ -1,4 +1,4 @@
-# Kiến trúc RAG cho Legal QA (Self-hosted, không dùng framework)
+# Kiến trúc RAG cho Legal QA
 
 > Mục tiêu: hệ thống hỏi-đáp pháp luật tiếng Việt, tự host toàn bộ (embedding + LLM ≤10B tham số), không phụ thuộc LangChain/LlamaIndex, code tự viết để kiểm soát chặt từng bước — quan trọng với domain pháp lý vì sai sót có hậu quả nghiêm trọng.
 
