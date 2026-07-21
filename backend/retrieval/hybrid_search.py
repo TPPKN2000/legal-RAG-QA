@@ -1,91 +1,117 @@
 """
-Pre-retrieval query transformation (design doc §2.1, §2.3;
-legalrag_adjustments.md §3).
+Hybrid search (design doc §3.1): fuse BM25 and Pinecone vector results with
+Reciprocal Rank Fusion (RRF) rather than a weighted score sum, because BM25
+scores and cosine similarities live on incomparable scales — RRF sidesteps
+that by fusing on *rank* instead of raw score.
 
-- rewrite_query(): turns colloquial language into legal-register variants
-  (3-5 paraphrases) so BM25/vector search hit the terms actually used in
-  statutes.
-- decompose_query(): asks the LLM to list distinct legal *aspects* that need
-  looking up (e.g. the disputed legal relationship, contract-validity
-  conditions, statute of limitations) as short standalone questions — NOT to
-  draft hypothetical statute text.
+    RRF(d) = sum over retrievers r of  weight_r / (k + rank_r(d))
 
-HyDE (generate_hyde) has been REMOVED. It asked the LLM to draft a passage
-"in the style of" a law provision or court finding and then embedded that
-generated text for vector search. design_doc §2.3 already flagged the risk
-(the LLM can produce legal-sounding but incorrect content that then steers
-retrieval), and that risk gets worse, not better, on a much smaller
-generation model. decompose_query replaces it: it only asks for short,
-generic *aspect* questions ("what governs contract validity here?"), never
-statute-styled prose, which keeps hallucinated legal content out of the
-retrieval query entirely. See backend/retrieval/hybrid_search.py for how the
-decomposed sub-queries are fused (weighted RRF, Judge-R1-style) with the
-standard BM25/vector routes.
+`k` (config.RRF_K) is the standard damping constant (60 is the commonly used
+default from the original RRF paper) that keeps a single retriever's #1 hit
+from completely dominating the fused ranking. `weight_r` defaults to 1.0 for
+every channel; the query-decomposition channel gets a higher weight (see
+legalrag_adjustments.md §3 / §7 "Weighted RRF theo Judge-R1").
+
+legalrag_adjustments.md §3 — HyDE removed. It used to be a 3rd retrieval
+channel here (a generated hypothetical statute passage, embedded and
+searched). It has been replaced with two non-generative-content additions:
+  1. NER-based entity masking of the query used for LAW retrieval (plaintiff
+     / defendant names are noise for statute search).
+  2. A decomposition channel: instead of one generated passage, the case
+     query is broken into several short legal-aspect questions (no invented
+     statute text) and each is run through vector search, fused in with a
+     higher RRF weight (Judge-R1-style agentic route).
 """
 from __future__ import annotations
 
-from backend.models import generate_text
+from typing import Optional
 
-_REWRITE_SYSTEM_PROMPT = (
-    "Bạn là trợ lý pháp lý. Nhiệm vụ: viết lại câu hỏi/tình huống sau đây thành "
-    "3 đến 5 câu hỏi tương đương, dùng thuật ngữ pháp lý chính xác thay cho "
-    "ngôn ngữ đời thường (ví dụ: 'đánh nhau' -> 'hành vi cố ý gây thương tích', "
-    "'lấy trộm' -> 'hành vi trộm cắp tài sản'). Mỗi câu hỏi trên một dòng, "
-    "không đánh số, không giải thích thêm."
-)
-
-_DECOMPOSE_SYSTEM_PROMPT = (
-    "Bạn là trợ lý pháp lý. Cho tình huống dưới đây, hãy liệt kê 3-4 khía cạnh pháp lý "
-    "riêng biệt cần tra cứu (ví dụ: quan hệ pháp luật tranh chấp, điều kiện có hiệu lực "
-    "của hợp đồng/giao dịch, thời hiệu khởi kiện, nghĩa vụ chứng minh). "
-    "Mỗi khía cạnh viết thành MỘT câu hỏi ngắn, không đánh số, không giải thích thêm, "
-    "KHÔNG được tự bịa nội dung điều luật cụ thể — chỉ nêu khía cạnh cần tra."
-)
+from backend import config
+from backend.indexing import bm25_index, vector_store
+from backend.models import RetrievedChunk
+from backend.retrieval.ner import extract_entities, mask_person_org_entities
+from backend.retrieval.querry_transform import decompose_query, rewrite_query
 
 
-def rewrite_query(query: str, n_variants: int = 4, max_new_tokens: int = 256) -> list[str]:
-    """Return `query` plus up to `n_variants` legal-register paraphrases.
+def _rrf_fuse_weighted(
+    channels: list[tuple[list[RetrievedChunk], float]],
+    k: int = config.RRF_K,
+) -> list[RetrievedChunk]:
+    """Fuse several (result_list, weight) channels by weighted reciprocal
+    rank. weight=1.0 for every channel reproduces the original unweighted
+    RRF used before query decomposition was introduced."""
+    scores: dict[str, float] = {}
+    best_chunk: dict[str, RetrievedChunk] = {}
 
-    Falls back to just [query] if generation fails for any reason — a failed
-    rewrite should never block retrieval entirely.
-    """
-    try:
-        raw = generate_text(
-            system_prompt=_REWRITE_SYSTEM_PROMPT,
-            user_prompt=query,
-            max_new_tokens=max_new_tokens,
-            temperature=0.7,
+    for results, weight in channels:
+        for rank, chunk in enumerate(results, start=1):
+            scores[chunk.chunk_id] = scores.get(chunk.chunk_id, 0.0) + weight / (k + rank)
+            # Keep the richest copy of the chunk (text/law_id/aid identical
+            # across retrievers, but we still need one canonical object).
+            best_chunk.setdefault(chunk.chunk_id, chunk)
+
+    fused = [
+        RetrievedChunk(
+            chunk_id=cid,
+            law_id=best_chunk[cid].law_id,
+            aid=best_chunk[cid].aid,
+            text=best_chunk[cid].text,
+            score=score,
+            source="fused",
         )
-    except Exception:
-        return [query]
-
-    variants = [line.strip("-• \t") for line in raw.splitlines() if line.strip()]
-    variants = [v for v in variants if len(v) > 5][:n_variants]
-    return [query] + variants if variants else [query]
+        for cid, score in scores.items()
+    ]
+    fused.sort(key=lambda c: c.score, reverse=True)
+    return fused
 
 
-def decompose_query(
+def hybrid_search(
     query: str,
-    masked_query: str | None = None,
-    n_subqueries: int = 4,
-    max_new_tokens: int = 200,
-) -> list[str]:
-    """Replacement for generate_hyde(): decompose the case query into the
-    distinct legal aspects that need to be looked up, as short standalone
-    questions. Never generates hypothetical statute text (see module
-    docstring for why HyDE was removed).
+    law_id: Optional[str] = None,
+    require_active: bool = True,
+    use_query_rewriting: bool = True,
+    use_decomposition: bool = True,
+    top_k: int = 30,
+) -> list[RetrievedChunk]:
+    """Run BM25 + vector search (optionally over multiple query rewrites and
+    NER-decomposed legal-aspect sub-queries), then fuse everything with
+    weighted RRF.
 
-    Returns [] on failure or if generation produced nothing usable — callers
-    should treat that as "skip the decomposition route", not as an error.
+    Metadata filtering (law_id / active-only) is pushed down into both the
+    BM25 index and the Pinecone query themselves (design doc §3.2), not
+    applied after fusion, so it never silently reduces an already-truncated
+    top_k.
     """
-    try:
-        raw = generate_text(
-            system_prompt=_DECOMPOSE_SYSTEM_PROMPT,
-            user_prompt=masked_query or query,
-            max_new_tokens=max_new_tokens,
-            temperature=0.5,
-        )
-    except Exception:
-        return []
-    lines = [l.strip("-•\t ") for l in raw.splitlines() if l.strip()]
-    return [l for l in lines if len(l) > 5][:n_subqueries]
+    bm25 = bm25_index.get_bm25_index()
+
+    # Party/organization names are noise for statute search — mask them out
+    # of the query used for the standard BM25+vector channels. (The Case
+    # Content API query, built separately in pipeline.py, intentionally
+    # keeps names since that API is looking for the matching case segment.)
+    entities = extract_entities(query)
+    law_query = mask_person_org_entities(query, entities)
+
+    channels: list[tuple[list[RetrievedChunk], float]] = []
+
+    base_queries = rewrite_query(law_query) if use_query_rewriting else [law_query]
+    for q in base_queries:
+        channels.append((
+            bm25.query(q, top_k=config.BM25_TOP_K, law_id=law_id, require_active=require_active),
+            config.RRF_WEIGHT_STANDARD,
+        ))
+        channels.append((
+            vector_store.query(q, top_k=config.VECTOR_TOP_K, law_id=law_id, require_active=require_active),
+            config.RRF_WEIGHT_STANDARD,
+        ))
+
+    if use_decomposition and config.QUERY_DECOMPOSITION_ENABLED:
+        for sub_q in decompose_query(
+            query, masked_query=law_query, n_subqueries=config.QUERY_DECOMPOSITION_MAX_SUBQUERIES
+        ):
+            channels.append((
+                vector_store.query(sub_q, top_k=config.VECTOR_TOP_K, law_id=law_id, require_active=require_active),
+                config.RRF_WEIGHT_AGENT,
+            ))
+
+    fused = _rrf_fuse_weighted(channels)
+    return fused[:top_k]
