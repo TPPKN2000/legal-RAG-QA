@@ -67,8 +67,12 @@ def parse_gold_law_provisions(related_law_text: str) -> list[dict]:
 
 
 def compute_law_f1(predicted: list[dict], gold_provisions: list[dict]) -> tuple[float, float, float]:
-    """Approximate micro P/R/F1 matched on article number (aid) only, since
-    the public test set doesn't expose law_ids for gold provisions."""
+    """Approximate P/R/F1 matched on article number (aid) only, since
+    the public test set doesn't expose law_ids for gold provisions.
+
+    NOTE: this is a PER-CASE (macro-style) score — see main() for the
+    micro-averaged aggregate that actually matches docs/evaluation.md §2.6.
+    """
     pred_aids = {int(p["aid"]) for p in predicted}
     gold_aids = {g["article_num"] for g in gold_provisions}
     if not pred_aids and not gold_aids:
@@ -195,6 +199,9 @@ def main():
                 "f1": f1,
                 "api_calls": api_calls,
                 "duration": duration,
+                "pred_law_evidence": record_dict["law_evidence"],
+                "gold_law_provisions": gold_provisions,
+                "n_segments": case.n_segments,
             }
         )
         log.info(
@@ -212,19 +219,76 @@ def main():
     log.info("BATCH SUMMARY (%d cases)", n)
     log.info("=" * 60)
     log.info("OutcomeAccuracy:        %.3f (%d/%d)", acc, sum(r["outcome_correct"] for r in results), n)
-    log.info("Avg Law F1 (approx*):   %.3f", avg_f1)
+    log.info("Avg Law F1 (macro, approx*):   %.3f", avg_f1)
     log.info("Total API calls:        %d (avg %.1f/case)", total_calls, total_calls / n)
     log.info("Avg time/case:          %.1fs", sum(r["duration"] for r in results) / n)
     log.info("Prediction distribution: %s", Counter(r["prediction"] for r in results))
     log.info("Gold distribution:       %s", Counter(gold_by_id[r["case_id"]]["verdict_label"] for r in results))
-    log.info(
-        "Approx score (Case Recall excluded — public set has no gold "
-        "case_evidence): 0.70*%.3f + 0.10*%.3f = %.3f",
-        acc, avg_f1, 0.70 * acc + 0.10 * avg_f1,
+
+    # legalrag_adjustments.md §4: docs/evaluation.md §2.6 defines Law F1 as a
+    # MICRO average — pool TP/FP/FN across the whole test set first, THEN
+    # divide — not the per-case macro average computed above. The two can
+    # diverge a lot when gold-provision counts are uneven across cases, so
+    # both are reported: macro above (kept for comparability with earlier
+    # runs) and the evaluation-formula-accurate micro F1 below.
+    pred_aid_counter: Counter[int] = Counter()
+    gold_aid_counter: Counter[int] = Counter()
+    for r in results:
+        pred_aid_counter.update(int(p["aid"]) for p in r["pred_law_evidence"])
+        gold_aid_counter.update(g["article_num"] for g in r["gold_law_provisions"])
+
+    tp = sum(min(pred_aid_counter[a], gold_aid_counter[a]) for a in pred_aid_counter)
+    n_pred = sum(pred_aid_counter.values())
+    n_gold = sum(gold_aid_counter.values())
+    micro_precision = tp / n_pred if n_pred else 0.0
+    micro_recall = tp / n_gold if n_gold else 0.0
+    micro_f1 = (
+        2 * micro_precision * micro_recall / (micro_precision + micro_recall)
+        if (micro_precision + micro_recall)
+        else 0.0
     )
-    log.info("* Law F1 is matched on article number (aid) only — the public")
-    log.info("  gold set gives law NAMES, not law_ids, so this is an upper-")
-    log.info("  bound approximation, not the real scoring formula.")
+    log.info(
+        "Micro Law F1 (matches evaluation.md §2.6 formula): P=%.3f R=%.3f F1=%.3f",
+        micro_precision, micro_recall, micro_f1,
+    )
+    log.info(
+        "* Both Law F1 numbers are matched on article number (aid) only — the public "
+        "gold set gives law NAMES, not law_ids, so these are upper-bound approximations, "
+        "not the organizers' real scoring (which also matches on law_id)."
+    )
+
+    # legalrag_adjustments.md §4: rough local estimate of the API-efficiency
+    # factor E_i (docs/evaluation.md §2.4). The public test set's n_i is
+    # usually unknown at real scoring time (§0/§1), so this uses each case's
+    # own n_segments when present and otherwise the same
+    # DEFAULT_MAX_API_CALLS_PER_CASE fallback pipeline.py itself falls back
+    # to, purely so the "effective budget" being measured against matches
+    # what the pipeline actually used.
+    def _e_i(api_calls: int, budget_n: int) -> float:
+        b_i = 2 * budget_n
+        ceiling = 5 * budget_n
+        if api_calls <= b_i:
+            return 1.0
+        if api_calls >= ceiling:
+            return 0.0
+        return 1 - (api_calls - b_i) / (3 * budget_n)
+
+    e_i_values = [
+        _e_i(r["api_calls"], r["n_segments"] or config.DEFAULT_MAX_API_CALLS_PER_CASE)
+        for r in results
+    ]
+    avg_e_i = sum(e_i_values) / len(e_i_values)
+    log.info(
+        "Estimated avg API efficiency E_i: %.3f (n_i unknown for cases without n_segments; "
+        "falls back to DEFAULT_MAX_API_CALLS_PER_CASE=%d as the assumed budget for those, "
+        "matching pipeline.py's own fallback — NOT the organizers' real n_i)",
+        avg_e_i, config.DEFAULT_MAX_API_CALLS_PER_CASE,
+    )
+    log.info(
+        "Approx score (Case Recall excluded — public set has no gold case_evidence): "
+        "0.70*%.3f + 0.10*%.3f(micro) = %.3f",
+        acc, micro_f1, 0.70 * acc + 0.10 * micro_f1,
+    )
     log.info("Submission saved to: %s", out_path)
 
 
