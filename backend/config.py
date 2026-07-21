@@ -63,7 +63,7 @@ RERANKER_MODEL_NAME = _env("RERANKER_MODEL_NAME", "AITeamVN/Vietnamese_Reranker"
 # repo id (with or without an "-Instruct" suffix) before a real run; see the
 # chat_template guard in models.py._get_generation_model for a loud failure
 # if this accidentally points at a non-chat base checkpoint.
-GENERATION_MODEL_NAME = _env("GENERATION_MODEL_NAME", "Qwen/Qwen3.5-0.8B-Instruct")
+GENERATION_MODEL_NAME = _env("GENERATION_MODEL_NAME", "Qwen/Qwen3.5-0.8B")
 DEVICE = _env("LEGALRAG_DEVICE", "cuda")  # falls back to cpu automatically in model.py
 # Qwen3-family chat templates default reasoning ("<think>...</think>") on;
 # left un-disabled this can silently eat the whole max_new_tokens budget
