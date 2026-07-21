@@ -100,11 +100,16 @@ def load_law_corpus(path: str | Path) -> list[RawLawDocument]:
             effective_date=law.get("effective_date"),
             expiry_date=law.get("expiry_date"),
         )
-        for art in law.get("articles", []):
+        # Defensive about schema variation: some corpus releases nest
+        # articles under "articles", others under "content" (seen in
+        # scripts/build_index.py's original ad-hoc loader).
+        for art in law.get("articles") or law.get("content") or []:
             aid = art.get("aid")
             if aid is None:
                 aid = art.get("id")
-            text = art.get("text") or art.get("content") or ""
+            # Likewise the article body key varies: "text" / "content" /
+            # "content_Article" have all been observed in practice.
+            text = art.get("text") or art.get("content") or art.get("content_Article") or ""
             doc.articles.append(
                 RawArticle(
                     law_id=law_id,
