@@ -216,17 +216,36 @@ def generate_text(
         # default "thinking" mode on, which can burn the whole
         # max_new_tokens budget on a <think>...</think> block before any
         # JSON is emitted. Explicitly disable it (config-controlled).
-        input_ids = tokenizer.apply_chat_template(
+        encoded = tokenizer.apply_chat_template(
             messages, enable_thinking=config.GENERATION_ENABLE_THINKING, **template_kwargs
-        ).to(device)
+        )
     except TypeError:
         # Non-Qwen3 tokenizer/template that doesn't accept enable_thinking.
-        input_ids = tokenizer.apply_chat_template(messages, **template_kwargs).to(device)
+        encoded = tokenizer.apply_chat_template(messages, **template_kwargs)
+
+  
+    # Depending on the tokenizer/transformers version, apply_chat_template can
+    # return either a tensor of input IDs or a BatchEncoding/dict containing
+    # input_ids plus an attention_mask. Passing a BatchEncoding positionally to
+    # model.generate makes transformers treat the whole object as inputs_tensor,
+    # which then crashes because BatchEncoding has no .shape. Normalize both
+    # forms before generation.
+    encoded = encoded.to(device) if hasattr(encoded, "to") else encoded
+    if isinstance(encoded, dict):
+        model_inputs = dict(encoded)
+        input_length = model_inputs["input_ids"].shape[-1]
+        generate_args = ()
+        generate_kwargs = model_inputs
+    else:
+        input_length = encoded.shape[-1]
+        generate_args = (encoded,)
+        generate_kwargs = {}
 
     do_sample = temperature > 0
     with torch.no_grad():
         output = model.generate(
-            input_ids,
+            *generate_args,
+            **generate_kwargs,
             max_new_tokens=max_new_tokens,
             do_sample=do_sample,
             temperature=temperature if do_sample else None,
@@ -234,7 +253,7 @@ def generate_text(
             pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
         )
 
-    new_tokens = output[0][input_ids.shape[-1]:]
+    new_tokens = output[0][input_length:]
     text = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
     # Defensive cleanup in case a <think> block still leaks through (e.g. the
     # enable_thinking kwarg was silently ignored by a particular checkpoint).
