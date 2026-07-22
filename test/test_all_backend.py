@@ -14,6 +14,24 @@ silently producing 50x B_WIN fallback like the notebook run did:
   2. scripts/build_index.py must call bm25.save() after bm25.build(), and
      you must have re-run it so data/bm25_index.pkl actually exists.
 
+IMPROVEMENT_PLAN.md §3.3 (MEASUREMENT INTEGRITY fix, applied here): Law F1
+used to compare predicted `aid` (a global, composite corpus ID, e.g. 50882)
+directly against gold `article_num` (a small "Điều N" number) — two
+completely different ID namespaces that essentially never intersected,
+which is why Micro Law F1 was stuck at 0.000 even for cases with non-empty
+`law_evidence`. `build_aid_to_article_num_map()` below resolves predicted
+(law_id, aid) back into the corpus's own "Điều N" numbering (parsed from
+each article's title) before comparing against gold — see its docstring for
+the residual approximation this still carries (article-number-only
+matching, since the public gold set doesn't expose law_id).
+
+IMPROVEMENT_PLAN.md §3.4 (ACCURACY fix, applied here): the harness now uses
+`backend.pipeline.process_case_with_debug()` instead of `process_case()` and
+reports the fallback rate (how many cases were forced to B_WIN by a
+crash/parse failure vs. genuinely predicted by the model) — this is the
+"Bước 1" instrumentation the plan calls for before judging whether the
+observed label distribution reflects real model behavior or fallback noise.
+
 Usage:
     python -m test.test_all_backend                # all cases
     python -m test.test_all_backend -n 5            # smoke test first
@@ -66,14 +84,100 @@ def parse_gold_law_provisions(related_law_text: str) -> list[dict]:
     return provisions
 
 
-def compute_law_f1(predicted: list[dict], gold_provisions: list[dict]) -> tuple[float, float, float]:
-    """Approximate P/R/F1 matched on article number (aid) only, since
-    the public test set doesn't expose law_ids for gold provisions.
+def build_aid_to_article_num_map(corpus_path) -> dict[tuple[str, int], int]:
+    """IMPROVEMENT_PLAN.md §3.3: map (law_id, aid) -> the "Điều N" article
+    number parsed from that article's title in the real law corpus.
+
+    Root cause this fixes: predicted `law_evidence` reports (law_id, aid)
+    straight from the corpus, where `aid` is a global sequential/composite
+    ID (e.g. 50882) that has no relationship to Vietnamese statute
+    numbering. Gold `related_law_provisions`, on the other hand, only gives
+    (law_name, "Điều N"). Comparing `aid` directly against `article_num` (the
+    pre-fix behavior) compares two unrelated ID spaces and produces an
+    intersection that's essentially always empty — hence Micro Law F1 stuck
+    at 0.000 even on cases with non-empty predicted law_evidence.
+
+    This function resolves the *prediction* side back into the gold side's
+    namespace using the corpus itself as ground truth, rather than guessing.
+    It intentionally does NOT attempt to resolve gold's law_name -> law_id
+    (the public gold set doesn't give enough to do that reliably) — so
+    matching afterwards still only compares on article number, not on
+    (law_id, article_num) pairs. That is a known, documented approximation
+    (see docs/progress_notes_v3.md's existing caveat and README §7), not the
+    organizers' real law_id-aware scoring, but it at least puts both sides
+    in a namespace where a match is possible at all.
+
+    Returns {} (and logs a warning) if the corpus can't be loaded, so
+    callers degrade to the old raw-aid comparison rather than crashing.
+    """
+    try:
+        from backend.ingestion.parser import load_law_corpus
+    except Exception as e:  # pragma: no cover - defensive import guard
+        log.warning("could not import backend.ingestion.parser for aid mapping: %s", e)
+        return {}
+
+    try:
+        docs = load_law_corpus(corpus_path)
+    except Exception as e:
+        log.warning("could not load law corpus at %s for aid mapping: %s", corpus_path, e)
+        return {}
+
+    mapping: dict[tuple[str, int], int] = {}
+    for doc in docs:
+        for art in doc.articles:
+            m = re.search(r"Điều\s+(\d+)", art.title or "")
+            if m:
+                article_num = m.group(1)
+                article_num = int(article_num)
+            elif art.aid < 1000:
+                # No parseable "Điều N" in the title — fall back to treating
+                # the corpus aid itself as the article number IF it's in a
+                # plausible range for Vietnamese statute numbering (a few
+                # hundred at most). Keeps the mapping usable for corpora
+                # where aid genuinely *is* the article number, without
+                # silently mis-mapping the large composite-ID case this fix
+                # targets (those are excluded by the < 1000 guard).
+                article_num = art.aid
+            else:
+                continue
+            mapping[(doc.law_id, art.aid)] = article_num
+    return mapping
+
+
+def _translate_predicted_aids(pred_law_evidence: list[dict], aid_map: dict[tuple[str, int], int]) -> set[int]:
+    """Resolve predicted (law_id, aid) items into the gold side's
+    article-number namespace via `aid_map`, falling back to the raw aid
+    unchanged when no mapping entry exists (degrades to the old, known
+    behavior for that item rather than dropping it silently)."""
+    out = set()
+    for p in pred_law_evidence:
+        key = (str(p["law_id"]), int(p["aid"]))
+        out.add(aid_map.get(key, int(p["aid"])))
+    return out
+
+
+def compute_law_f1(
+    predicted: list[dict],
+    gold_provisions: list[dict],
+    aid_map: dict[tuple[str, int], int] | None = None,
+) -> tuple[float, float, float]:
+    """Approximate P/R/F1 matched on article number only, since the public
+    test set doesn't expose law_ids for gold provisions.
+
+    IMPROVEMENT_PLAN.md §3.3: when `aid_map` is provided (built once by
+    `build_aid_to_article_num_map`), predicted aids are translated into the
+    corpus's own article-number namespace before comparing against gold —
+    without this, `predicted`'s aids and `gold_provisions`'s article numbers
+    live in incomparable namespaces (see that function's docstring) and this
+    always returns ~0 regardless of retrieval quality.
 
     NOTE: this is a PER-CASE (macro-style) score — see main() for the
     micro-averaged aggregate that actually matches docs/evaluation.md §2.6.
     """
-    pred_aids = {int(p["aid"]) for p in predicted}
+    if aid_map:
+        pred_aids = _translate_predicted_aids(predicted, aid_map)
+    else:
+        pred_aids = {int(p["aid"]) for p in predicted}
     gold_aids = {g["article_num"] for g in gold_provisions}
     if not pred_aids and not gold_aids:
         return 1.0, 1.0, 1.0
@@ -96,7 +200,7 @@ def main():
     from backend import config
     from backend.ingestion.parser import load_test_set
     from backend.models import CaseQuery, SubmissionRecord, generate_text
-    from backend.pipeline import process_case
+    from backend.pipeline import process_case_with_debug
     from backend.case_api_client import client as case_api_client
 
     # --- pre-flight checks -------------------------------------------------
@@ -119,7 +223,7 @@ def main():
                 "Set it in .env or `export ALQAC_TOKEN=alqac_...` before running."
             )
 
-    from backend.pipeline import process_case  # import after stubbing
+    from backend.pipeline import process_case_with_debug  # import after stubbing
 
     if not config.BM25_INDEX_PATH.exists():
         sys.exit(
@@ -137,6 +241,17 @@ def main():
     t0 = time.time()
     generate_text(system_prompt="ping", user_prompt="ping", max_new_tokens=4, temperature=0.0)
     log.info("Model warm-up done in %.1fs", time.time() - t0)
+
+    # IMPROVEMENT_PLAN.md §3.3: build the (law_id, aid) -> article_num map
+    # once, from the real corpus, before the loop.
+    aid_map = build_aid_to_article_num_map(config.LAW_CORPUS_PATH)
+    if aid_map:
+        log.info("Built aid->article_num map from corpus: %d entries (IMPROVEMENT_PLAN.md §3.3)", len(aid_map))
+    else:
+        log.warning(
+            "aid->article_num map is empty — Law F1 below will fall back to the old "
+            "raw-aid-vs-article_num comparison, which is expected to stay near 0."
+        )
 
     # --- load test set + gold ----------------------------------------------
     # NOTE (legalrag_adjustments.md §1 / guideline.txt cross-check): this
@@ -182,10 +297,11 @@ def main():
         log.info("--- [%d/%d] %s ---", i, len(batch), case_id)
         t0 = time.time()
         try:
-            record = process_case(case)
+            record, debug = process_case_with_debug(case)
         except Exception as e:
             log.error("case %s crashed, emitting conservative fallback: %s", case_id, e)
             record = SubmissionRecord(case_id=case_id, prediction="B_WIN")
+            debug = {"is_fallback": True, "fallback_reason": f"harness-level crash: {e}", "confidence": 0.0}
         duration = time.time() - t0
 
         record_dict = json.loads(record.model_dump_json())
@@ -195,7 +311,7 @@ def main():
             json.dump(submissions, f, ensure_ascii=False, indent=2)
 
         outcome_correct = int(record.prediction == gold_label)
-        precision, recall, f1 = compute_law_f1(record_dict["law_evidence"], gold_provisions)
+        precision, recall, f1 = compute_law_f1(record_dict["law_evidence"], gold_provisions, aid_map)
         api_calls = case_api_client.calls_made(case_id)
 
         results.append(
@@ -211,11 +327,15 @@ def main():
                 "pred_law_evidence": record_dict["law_evidence"],
                 "gold_law_provisions": gold_provisions,
                 "n_segments": case.n_segments,
+                "is_fallback": bool(debug.get("is_fallback", False)),
+                "fallback_reason": debug.get("fallback_reason"),
+                "confidence": debug.get("confidence"),
             }
         )
         log.info(
-            "-> pred=%s gold=%s correct=%s | law F1(approx)=%.3f | api_calls=%d | %.1fs",
-            record.prediction, gold_label, bool(outcome_correct), f1, api_calls, duration,
+            "-> pred=%s gold=%s correct=%s | law F1(approx)=%.3f | api_calls=%d | fallback=%s | %.1fs",
+            record.prediction, gold_label, bool(outcome_correct), f1, api_calls,
+            bool(debug.get("is_fallback", False)), duration,
         )
 
     # --- summary --------------------------------------------------------------
@@ -234,6 +354,22 @@ def main():
     log.info("Prediction distribution: %s", Counter(r["prediction"] for r in results))
     log.info("Gold distribution:       %s", Counter(gold_by_id[r["case_id"]]["verdict_label"] for r in results))
 
+    # IMPROVEMENT_PLAN.md §3.4 "Bước 1": report how many predictions were a
+    # forced fallback (crash / unparseable output) vs. a genuine model
+    # choice — needed to interpret the prediction-distribution line above
+    # correctly (a skewed distribution caused mostly by fallbacks needs a
+    # different fix than one caused by the model's own label preference).
+    n_fallback = sum(1 for r in results if r["is_fallback"])
+    log.info(
+        "Fallback rate (crash/parse-failure -> forced B_WIN): %d/%d (%.1f%%)",
+        n_fallback, n, 100 * n_fallback / n if n else 0.0,
+    )
+    if n_fallback:
+        reasons = Counter(r["fallback_reason"] for r in results if r["is_fallback"])
+        log.info("Top fallback reasons: %s", reasons.most_common(5))
+    non_fallback_predictions = Counter(r["prediction"] for r in results if not r["is_fallback"])
+    log.info("Prediction distribution EXCLUDING fallbacks: %s", non_fallback_predictions)
+
     # legalrag_adjustments.md §4: docs/evaluation.md §2.6 defines Law F1 as a
     # MICRO average — pool TP/FP/FN across the whole test set first, THEN
     # divide — not the per-case macro average computed above. The two can
@@ -243,7 +379,10 @@ def main():
     pred_aid_counter: Counter[int] = Counter()
     gold_aid_counter: Counter[int] = Counter()
     for r in results:
-        pred_aid_counter.update(int(p["aid"]) for p in r["pred_law_evidence"])
+        if aid_map:
+            pred_aid_counter.update(_translate_predicted_aids(r["pred_law_evidence"], aid_map))
+        else:
+            pred_aid_counter.update(int(p["aid"]) for p in r["pred_law_evidence"])
         gold_aid_counter.update(g["article_num"] for g in r["gold_law_provisions"])
 
     tp = sum(min(pred_aid_counter[a], gold_aid_counter[a]) for a in pred_aid_counter)
@@ -257,11 +396,11 @@ def main():
         else 0.0
     )
     log.info(
-        "Micro Law F1 (matches evaluation.md §2.6 formula): P=%.3f R=%.3f F1=%.3f",
+        "Micro Law F1 (matches evaluation.md §2.6 formula, aid->article_num mapped): P=%.3f R=%.3f F1=%.3f",
         micro_precision, micro_recall, micro_f1,
     )
     log.info(
-        "* Both Law F1 numbers are matched on article number (aid) only — the public "
+        "* Both Law F1 numbers are matched on article number only — the public "
         "gold set gives law NAMES, not law_ids, so these are upper-bound approximations, "
         "not the organizers' real scoring (which also matches on law_id)."
     )
