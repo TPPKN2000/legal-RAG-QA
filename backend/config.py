@@ -128,5 +128,18 @@ COMPRESSION_TARGET_RATIO = _env_float("COMPRESSION_TARGET_RATIO", 0.5)
 TOP_N_EVIDENCE_FOR_DIGEST = _env_int("TOP_N_EVIDENCE_FOR_DIGEST", 5)
 CASE_DIGEST_MAX_NEW_TOKENS = _env_int("CASE_DIGEST_MAX_NEW_TOKENS", 220)
 
+# --- Prediction-collapse fix (IMPROVEMENT_PLAN.md §3.4) --------------------
+# The model is now asked to also emit a quantitative "accepted_ratio_estimate"
+# (0.0-1.0, see prompt_builder.SYSTEM_PROMPT) alongside its categorical
+# "prediction". When enabled, generate.predict_outcome() derives the final
+# label from that ratio (via simple, fixed thresholds) instead of trusting
+# the categorical pick verbatim whenever the two disagree. A small model
+# under uncertainty tends to collapse onto one or two "safe-looking"
+# categorical labels (observed: never A_WIN/PARTIAL_B_WIN across 50 cases);
+# asking for — and trusting — a percentage estimate gives it a less
+# collapse-prone way to express the same judgement. Set to "false" to fall
+# back to using the model's categorical "prediction" field as-is.
+USE_RATIO_DERIVED_LABEL = _env("USE_RATIO_DERIVED_LABEL", "true").lower() == "true"
+
 # --- Prediction labels (docs/test_design.md) ------------------------------
 VALID_PREDICTIONS = ("A_WIN", "PARTIAL_A_WIN", "PARTIAL_B_WIN", "B_WIN")
