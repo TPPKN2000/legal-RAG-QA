@@ -13,14 +13,14 @@ structure (never a fixed token-window split), because a legal clause's
 meaning frequently hinges on a preceding qualifier like "trừ trường hợp"
 that a hard token cut could separate from its clause.
 
-legalrag_adjustments.md §6b: a Khoản/Điểm that is itself unusually long (a
+system_adjustments_v3.md §6b: a Khoản/Điểm that is itself unusually long (a
 long enumerated clause) is no longer kept fully intact — it is soft-split on
 sentence boundaries (never a hard token/char cut, same rule-based-only
 principle as everywhere else in this module) once it exceeds
 config.CHILD_MAX_CHARS, matching the threshold ViDRILL found effective for
 Vietnamese legal text (~450 words / ~900 chars).
 
-legalrag_adjustments.md §6a: `build_parent_lookup()` used to be dead code —
+system_adjustments_v3.md §6a: `build_parent_lookup()` used to be dead code —
 nothing called it. `scripts/build_index.py` now calls it and persists the
 result to `config.PARENT_LOOKUP_PATH`, and `pipeline.py` loads it to give
 the cross-encoder reranker full-article context (see pipeline.py's
@@ -152,7 +152,7 @@ def chunk_article(article: RawArticle) -> list[LawChunk]:
         if split.diem_no:
             suffix += f"_d{split.diem_no}"
 
-        # legalrag_adjustments.md §6b: soft-split an oversized Khoản/Điểm
+        # system_adjustments_v3.md §6b: soft-split an oversized Khoản/Điểm
         # into multiple child chunks on sentence boundaries rather than
         # keeping it intact. Each sub-part still traces back to the same
         # (law_id, aid) for citation purposes.
@@ -193,7 +193,7 @@ def build_parent_lookup(chunks: list[LawChunk]) -> dict[str, LawChunk]:
     """Map parent_id -> parent LawChunk, so retrieval can re-attach full
     article context to a matched child chunk at generation time.
 
-    legalrag_adjustments.md §6a: this is now actually wired up —
+    system_adjustments_v3.md §6a: this is now actually wired up —
     `scripts/build_index.py` persists the result to
     `config.PARENT_LOOKUP_PATH`, and `pipeline.py.collect_law_evidence`
     loads it to give the cross-encoder reranker full-article context.
