@@ -1,6 +1,6 @@
 # Design Experiment
 ## Test Dataset
-`C:\Users\VINH\OneDrive - VNU-HCMUS\Attachments\Desktop\legalRAG\data\ALQAC2026_public_test.json`
+`.\data\ALQAC2026_public_test.json`
 ## Submission Format
 The submission must contain a list of predictions, one object per test case:
 `submission_example.json`
