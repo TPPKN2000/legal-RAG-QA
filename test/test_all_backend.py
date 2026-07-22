@@ -14,7 +14,7 @@ silently producing 50x B_WIN fallback like the notebook run did:
   2. scripts/build_index.py must call bm25.save() after bm25.build(), and
      you must have re-run it so data/bm25_index.pkl actually exists.
 
-IMPROVEMENT_PLAN.md §3.3 (MEASUREMENT INTEGRITY fix, applied here): Law F1
+system_adjustments_v4.md §3.3 (MEASUREMENT INTEGRITY fix, applied here): Law F1
 used to compare predicted `aid` (a global, composite corpus ID, e.g. 50882)
 directly against gold `article_num` (a small "Điều N" number) — two
 completely different ID namespaces that essentially never intersected,
@@ -25,7 +25,7 @@ each article's title) before comparing against gold — see its docstring for
 the residual approximation this still carries (article-number-only
 matching, since the public gold set doesn't expose law_id).
 
-IMPROVEMENT_PLAN.md §3.4 (ACCURACY fix, applied here): the harness now uses
+system_adjustments_v4.md §3.4 (ACCURACY fix, applied here): the harness now uses
 `backend.pipeline.process_case_with_debug()` instead of `process_case()` and
 reports the fallback rate (how many cases were forced to B_WIN by a
 crash/parse failure vs. genuinely predicted by the model) — this is the
@@ -85,7 +85,7 @@ def parse_gold_law_provisions(related_law_text: str) -> list[dict]:
 
 
 def build_aid_to_article_num_map(corpus_path) -> dict[tuple[str, int], int]:
-    """IMPROVEMENT_PLAN.md §3.3: map (law_id, aid) -> the "Điều N" article
+    """system_adjustments_v4.md §3.3: map (law_id, aid) -> the "Điều N" article
     number parsed from that article's title in the real law corpus.
 
     Root cause this fixes: predicted `law_evidence` reports (law_id, aid)
@@ -164,7 +164,7 @@ def compute_law_f1(
     """Approximate P/R/F1 matched on article number only, since the public
     test set doesn't expose law_ids for gold provisions.
 
-    IMPROVEMENT_PLAN.md §3.3: when `aid_map` is provided (built once by
+    system_adjustments_v4.md §3.3: when `aid_map` is provided (built once by
     `build_aid_to_article_num_map`), predicted aids are translated into the
     corpus's own article-number namespace before comparing against gold —
     without this, `predicted`'s aids and `gold_provisions`'s article numbers
@@ -242,11 +242,11 @@ def main():
     generate_text(system_prompt="ping", user_prompt="ping", max_new_tokens=4, temperature=0.0)
     log.info("Model warm-up done in %.1fs", time.time() - t0)
 
-    # IMPROVEMENT_PLAN.md §3.3: build the (law_id, aid) -> article_num map
+    # system_adjustments_v4.md §3.3: build the (law_id, aid) -> article_num map
     # once, from the real corpus, before the loop.
     aid_map = build_aid_to_article_num_map(config.LAW_CORPUS_PATH)
     if aid_map:
-        log.info("Built aid->article_num map from corpus: %d entries (IMPROVEMENT_PLAN.md §3.3)", len(aid_map))
+        log.info("Built aid->article_num map from corpus: %d entries (system_adjustments_v4.md §3.3)", len(aid_map))
     else:
         log.warning(
             "aid->article_num map is empty — Law F1 below will fall back to the old "
@@ -254,7 +254,7 @@ def main():
         )
 
     # --- load test set + gold ----------------------------------------------
-    # NOTE (legalrag_adjustments.md §1 / guideline.txt cross-check): this
+    # NOTE (system_adjustments_v3.md §1 / guideline.txt cross-check): this
     # script reads `verdict_label` and `related_law_provisions` straight out
     # of the test-set file for local scoring. Those two fields exist ONLY in
     # the Public test set. The official Private test set (and the real
@@ -354,7 +354,7 @@ def main():
     log.info("Prediction distribution: %s", Counter(r["prediction"] for r in results))
     log.info("Gold distribution:       %s", Counter(gold_by_id[r["case_id"]]["verdict_label"] for r in results))
 
-    # IMPROVEMENT_PLAN.md §3.4 "Bước 1": report how many predictions were a
+    # system_adjustments_v4.md §3.4 "Bước 1": report how many predictions were a
     # forced fallback (crash / unparseable output) vs. a genuine model
     # choice — needed to interpret the prediction-distribution line above
     # correctly (a skewed distribution caused mostly by fallbacks needs a
@@ -370,7 +370,7 @@ def main():
     non_fallback_predictions = Counter(r["prediction"] for r in results if not r["is_fallback"])
     log.info("Prediction distribution EXCLUDING fallbacks: %s", non_fallback_predictions)
 
-    # legalrag_adjustments.md §4: docs/evaluation.md §2.6 defines Law F1 as a
+    # system_adjustments_v3.md §4: docs/evaluation.md §2.6 defines Law F1 as a
     # MICRO average — pool TP/FP/FN across the whole test set first, THEN
     # divide — not the per-case macro average computed above. The two can
     # diverge a lot when gold-provision counts are uneven across cases, so
@@ -405,7 +405,7 @@ def main():
         "not the organizers' real scoring (which also matches on law_id)."
     )
 
-    # legalrag_adjustments.md §4: rough local estimate of the API-efficiency
+    # system_adjustments_v3.md §4: rough local estimate of the API-efficiency
     # factor E_i (docs/evaluation.md §2.4). The public test set's n_i is
     # usually unknown at real scoring time (§0/§1), so this uses each case's
     # own n_segments when present and otherwise the same
