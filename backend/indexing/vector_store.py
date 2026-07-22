@@ -6,7 +6,7 @@ DB. Metadata filtering (design doc §3.2 — effective/expired provisions,
 document type) is pushed down into Pinecone's native metadata filter so
 expired law is excluded *before* the ANN search runs, not after.
 
-IMPROVEMENT_PLAN.md §3.1 (SPEED fix, applied here): `_get_index()` is now
+system_adjustments_v4.md §3.1 (SPEED fix, applied here): `_get_index()` is now
 `@lru_cache`d — see its docstring below for why this was the dominant
 source of the ~197s/case average observed in test/test_all_backend.log.
 """
@@ -48,7 +48,7 @@ def ensure_index() -> None:
 
 @lru_cache(maxsize=1)
 def _get_index():
-    """Cache the Index client (IMPROVEMENT_PLAN.md §3.1).
+    """Cache the Index client (system_adjustments_v4.md §3.1).
 
     Constructing `Pinecone(...).Index(...)` triggers a `describe_index()`
     network round-trip inside the SDK, and `ensure_index()` above adds a
