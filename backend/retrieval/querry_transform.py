@@ -1,6 +1,6 @@
 """
 Pre-retrieval query transformation (design doc §2.1, §2.3;
-legalrag_adjustments.md §3).
+system_adjustments_v3.md §3).
 
 - rewrite_query(): turns colloquial language into legal-register variants
   (3-5 paraphrases) so BM25/vector search hit the terms actually used in
