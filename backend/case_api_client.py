@@ -10,6 +10,10 @@ Key constraints encoded here:
   - Every call counts against the case's API-efficiency budget
     (docs/evaluation.md §2.4), so this client also tracks call counts per
     case_id for `pipeline.py`'s budget-aware evidence loop.
+
+IMPROVEMENT_PLAN.md §3.2 (BUDGET INTEGRITY fix, applied here): the call
+counter now increments exactly once per logical `retrieve()` invocation,
+not once per HTTP attempt inside it — see `retrieve()`'s inline comment.
 """
 from __future__ import annotations
 
@@ -84,10 +88,22 @@ class CaseContentAPIClient:
         headers = {"X-API-Key": self.token, "Content-Type": "application/json"}
         payload = {"query": query, "case_id": case_id}
 
+        # IMPROVEMENT_PLAN.md §3.2: count exactly ONE call for this logical
+        # query, regardless of how many transient-error retries (429 / 503 /
+        # network hiccup) it takes underneath. Retries are not additional
+        # queries the *caller* issued, and must not inflate the
+        # API-efficiency budget c_i that E_i is computed from
+        # (docs/evaluation.md §2.4) — previously this increment lived inside
+        # the `for attempt` loop below and fired once per HTTP attempt, so a
+        # single logical query could silently cost 2-3 units of budget
+        # whenever the API returned 429/503 (observed directly in
+        # test_all_backend.log: case_3241 reached api_calls=9 despite
+        # DEFAULT_MAX_API_CALLS_PER_CASE=8).
+        self._calls_per_case[case_id] += 1
+
         last_exc: Exception | None = None
         for attempt in range(self.max_retries):
             self._limiter.wait()
-            self._calls_per_case[case_id] += 1
             try:
                 resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
             except requests.RequestException as e:
