@@ -5,16 +5,16 @@ process_case() ties together:
   1. Budget-aware Case Content API evidence collection (docs/evaluation.md §2.4 —
      no penalty up to 2*n_i calls, zero credit at 5*n_i).
   2. Law-corpus retrieval: hybrid_search (BM25 + Pinecone + weighted RRF) ->
-     rerank (with parent-article context, legalrag_adjustments.md §6a) ->
-     optional retrieval-evaluator re-round (legalrag_adjustments.md §7).
-  3. A case-fact digest step (legalrag_adjustments.md §5) so the final
+     rerank (with parent-article context, system_adjustments_v3.md §6a) ->
+     optional retrieval-evaluator re-round (system_adjustments_v3.md §7).
+  3. A case-fact digest step (system_adjustments_v3.md §5) so the final
      generation call doesn't carry raw case-evidence text.
   4. Outcome generation with grounding verification.
   5. Assembly into a `SubmissionRecord` matching docs/submission_example.json.
 
 `submission.py` is the CLI that loops this over the whole test set.
 
-IMPROVEMENT_PLAN.md §3.4: `process_case()` now delegates to
+system_adjustments_v4.md §3.4: `process_case()` now delegates to
 `process_case_with_debug()`, which returns the `SubmissionRecord` alongside a
 small debug dict (`is_fallback`, `fallback_reason`, `confidence`,
 `dropped_hallucinated_citations`) sourced from `generate.OutcomePrediction`.
@@ -44,7 +44,7 @@ log = logging.getLogger(__name__)
 def _case_api_budget(case: CaseQuery) -> int:
     """No-penalty ceiling for this case (docs/evaluation.md §2.4: B_i = 2*n_i).
     Falls back to a fixed cap when n_i isn't known ahead of time — which,
-    per legalrag_adjustments.md §0/§1, is the common case: the private test
+    per system_adjustments_v3.md §0/§1, is the common case: the private test
     set only exposes case_id + case_query, so this fallback branch is not a
     rare edge case, it's the default path at real scoring time."""
     if case.n_segments:
@@ -98,7 +98,7 @@ def collect_case_evidence(case: CaseQuery, max_queries: int | None = None) -> li
 @lru_cache(maxsize=1)
 def _get_parent_lookup() -> dict[str, LawChunk]:
     """Lazily load the parent (whole-Điều) chunk lookup persisted by
-    scripts/build_index.py (legalrag_adjustments.md §6a). Returns {} if the
+    scripts/build_index.py (system_adjustments_v3.md §6a). Returns {} if the
     index hasn't been (re)built with the current script yet, so rerank
     degrades gracefully to child-only text instead of crashing."""
     try:
@@ -115,11 +115,11 @@ def _get_parent_lookup() -> dict[str, LawChunk]:
 
 def _enrich_with_parent_text(candidates: list[RetrievedChunk]) -> list[RetrievedChunk]:
     """Swap in whole-article (parent) text for reranking only
-    (legalrag_adjustments.md §6a: a cross-encoder scores a (query, chunk)
+    (system_adjustments_v3.md §6a: a cross-encoder scores a (query, chunk)
     pair more accurately with fuller context). The child chunk_id/aid are
     preserved so citations stay precise; text is swapped back to the child
     text after rerank (see collect_law_evidence) to keep the final
-    generation prompt's law section short (legalrag_adjustments.md §5)."""
+    generation prompt's law section short (system_adjustments_v3.md §5)."""
     parent_lookup = _get_parent_lookup()
     if not parent_lookup:
         return candidates
@@ -132,9 +132,9 @@ def _enrich_with_parent_text(candidates: list[RetrievedChunk]) -> list[Retrieved
 
 def collect_law_evidence(query_text: str) -> list[RetrievedChunk]:
     """Hybrid search (design doc §3) -> cross-encoder rerank on parent-article
-    context (design doc §4.1, legalrag_adjustments.md §6a) -> child text
+    context (design doc §4.1, system_adjustments_v3.md §6a) -> child text
     restored for citation precision -> optional retrieval-evaluator re-round
-    (legalrag_adjustments.md §7).
+    (system_adjustments_v3.md §7).
     """
     candidates = hybrid_search(query_text, top_k=config.RERANK_TOP_K)
     child_text_by_id = {c.chunk_id: c.text for c in candidates}
@@ -144,7 +144,7 @@ def collect_law_evidence(query_text: str) -> list[RetrievedChunk]:
         c.model_copy(update={"text": child_text_by_id.get(c.chunk_id, c.text)}) for c in reranked
     ]
 
-    # legalrag_adjustments.md §7 "Retrieval Evaluator -> core cho vòng lặp":
+    # system_adjustments_v3.md §7 "Retrieval Evaluator -> core cho vòng lặp":
     # reuse the cross-encoder score already computed above as a cheap gate —
     # no extra LLM-judge call. If even the best reranked candidate scores
     # below threshold, retrieval likely missed the mark; try one more round
@@ -176,7 +176,7 @@ def collect_law_evidence(query_text: str) -> list[RetrievedChunk]:
 
 def process_case_with_debug(case: CaseQuery) -> tuple[SubmissionRecord, dict]:
     """Same work as `process_case()`, but also returns a debug dict carrying
-    fields that don't belong on `SubmissionRecord` (IMPROVEMENT_PLAN.md
+    fields that don't belong on `SubmissionRecord` (system_adjustments_v4.md
     §3.4): `is_fallback`, `fallback_reason`, `confidence`,
     `dropped_hallucinated_citations`. Intended for local evaluation harnesses
     (test/test_all_backend.py); `backend.submission` should keep using the
@@ -185,7 +185,7 @@ def process_case_with_debug(case: CaseQuery) -> tuple[SubmissionRecord, dict]:
     """
     case_evidence_hits = collect_case_evidence(case)
 
-    # legalrag_adjustments.md §5: only the top-N (by API relevance score) hits
+    # system_adjustments_v3.md §5: only the top-N (by API relevance score) hits
     # go into the digest LLM call — the *full* retrieved set is still
     # reported in the submission below for Case-Recall scoring purposes,
     # this cap only bounds the digest step's token usage.
