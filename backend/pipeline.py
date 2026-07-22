@@ -13,6 +13,15 @@ process_case() ties together:
   5. Assembly into a `SubmissionRecord` matching docs/submission_example.json.
 
 `submission.py` is the CLI that loops this over the whole test set.
+
+IMPROVEMENT_PLAN.md §3.4: `process_case()` now delegates to
+`process_case_with_debug()`, which returns the `SubmissionRecord` alongside a
+small debug dict (`is_fallback`, `fallback_reason`, `confidence`,
+`dropped_hallucinated_citations`) sourced from `generate.OutcomePrediction`.
+`SubmissionRecord` itself is NOT extended with these fields — it must stay
+byte-for-byte compatible with docs/submission_example.json — so callers that
+need this instrumentation (test/test_all_backend.py's fallback-rate report)
+call `process_case_with_debug()` directly instead.
 """
 from __future__ import annotations
 
@@ -165,7 +174,15 @@ def collect_law_evidence(query_text: str) -> list[RetrievedChunk]:
     return reranked
 
 
-def process_case(case: CaseQuery) -> SubmissionRecord:
+def process_case_with_debug(case: CaseQuery) -> tuple[SubmissionRecord, dict]:
+    """Same work as `process_case()`, but also returns a debug dict carrying
+    fields that don't belong on `SubmissionRecord` (IMPROVEMENT_PLAN.md
+    §3.4): `is_fallback`, `fallback_reason`, `confidence`,
+    `dropped_hallucinated_citations`. Intended for local evaluation harnesses
+    (test/test_all_backend.py); `backend.submission` should keep using the
+    plain `process_case()` below since only the strict submission schema
+    matters there.
+    """
     case_evidence_hits = collect_case_evidence(case)
 
     # legalrag_adjustments.md §5: only the top-N (by API relevance score) hits
@@ -184,10 +201,26 @@ def process_case(case: CaseQuery) -> SubmissionRecord:
             "case=%s: dropped %d citation(s) not present in retrieved law evidence",
             case.case_id, outcome.dropped_hallucinated_citations,
         )
+    if outcome.is_fallback:
+        log.warning("case=%s: forced fallback prediction (%s)", case.case_id, outcome.fallback_reason)
 
-    return SubmissionRecord(
+    record = SubmissionRecord(
         case_id=case.case_id,
         prediction=outcome.prediction,
         case_evidence=[h.chunk_id for h in case_evidence_hits],
         law_evidence=outcome.law_citations,
     )
+    debug = {
+        "is_fallback": outcome.is_fallback,
+        "fallback_reason": outcome.fallback_reason,
+        "confidence": outcome.confidence,
+        "dropped_hallucinated_citations": outcome.dropped_hallucinated_citations,
+    }
+    return record, debug
+
+
+def process_case(case: CaseQuery) -> SubmissionRecord:
+    """Thin wrapper over `process_case_with_debug()` for callers that only
+    need the `SubmissionRecord` (e.g. `backend.submission`)."""
+    record, _debug = process_case_with_debug(case)
+    return record
