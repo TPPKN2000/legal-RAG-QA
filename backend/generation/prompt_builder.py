@@ -13,6 +13,18 @@ Enforces the "Grounding & Citation nghiêm ngặt" requirement:
     prompt, and a <1B generation model degrades faster on long noisy context
     than the previously-planned 8B model would have).
 
+IMPROVEMENT_PLAN.md §3.4 (ACCURACY fix, applied here): the system prompt now
+also asks for a quantitative "accepted_ratio_estimate" (0.0-1.0) BEFORE the
+categorical label, with fixed thresholds mapping ratio -> label, plus a
+balanced 4-label few-shot block. Root cause being addressed: across the 50
+public test cases, predictions never once landed on A_WIN or PARTIAL_B_WIN —
+only PARTIAL_A_WIN (the categorical "safe middle" pick) and B_WIN (the
+_safe_default() fallback label) ever appeared. A percentage estimate is a
+different kind of judgement call than picking one of four discrete buckets
+cold, and is intended to be less prone to collapsing onto a "safe-looking"
+default under uncertainty. See generate.py for how the ratio is used to
+derive (and, on disagreement, override) the categorical label.
+
 Output contract: the model is asked to return a single JSON object so
 `generation/generate.py` can parse it deterministically instead of
 regex-scraping free-form prose.
@@ -33,13 +45,26 @@ QUY TẮC BẮT BUỘC:
    - PARTIAL_B_WIN: tòa chấp nhận một phần, phần được chấp nhận <= 50%.
    - B_WIN: tòa bác toàn bộ yêu cầu của nguyên đơn.
    Nếu vụ án có nhiều yêu cầu, chỉ tập trung vào yêu cầu chính (case_query).
-5. Trả lời CHỈ bằng một đối tượng JSON hợp lệ theo đúng schema sau, không thêm văn bản nào khác, không dùng markdown code fence:
+5. TRƯỚC KHI chọn nhãn, hãy ước lượng "accepted_ratio_estimate": tỉ lệ (số thực 0.0-1.0) yêu cầu của nguyên đơn mà bạn cho rằng được tòa chấp nhận, dựa thuần túy trên bằng chứng và điều luật đã cho. Suy ra nhãn TỪ CHÍNH tỉ lệ này theo đúng bảng sau (không tự ý chọn nhãn khác với bảng):
+   - ratio > 0.99         -> A_WIN
+   - 0.5  < ratio <= 0.99 -> PARTIAL_A_WIN
+   - 0.0  < ratio <= 0.5  -> PARTIAL_B_WIN
+   - ratio == 0.0         -> B_WIN
+   KHÔNG được mặc định chọn "PARTIAL_A_WIN" hoặc "B_WIN" chỉ vì đây là lựa chọn nghe "an toàn". Hãy ước lượng ratio một cách trung thực dựa trên chứng cứ thực tế — kể cả khi điều đó dẫn tới A_WIN hoặc PARTIAL_B_WIN.
+6. Trả lời CHỈ bằng một đối tượng JSON hợp lệ theo đúng schema sau, không thêm văn bản nào khác, không dùng markdown code fence:
 {
+  "accepted_ratio_estimate": <float 0.0-1.0>,
   "prediction": "A_WIN" | "PARTIAL_A_WIN" | "PARTIAL_B_WIN" | "B_WIN",
   "law_citations": [{"law_id": "...", "aid": <int>}, ...],
   "confidence": <float 0-1>,
   "reasoning": "giải thích ngắn gọn, có trích dẫn Điều/Khoản"
-}"""
+}
+
+VÍ DỤ (chỉ minh hoạ định dạng và cách suy ra nhãn từ ratio, không phải nội dung thật):
+- Bằng chứng + điều luật cho thấy nguyên đơn có đầy đủ căn cứ, bị đơn không phản bác được -> ratio=1.0 -> "prediction": "A_WIN"
+- Tòa nhiều khả năng chấp nhận phần lớn yêu cầu (ví dụ ~70%) -> ratio=0.7 -> "prediction": "PARTIAL_A_WIN"
+- Tòa nhiều khả năng chỉ chấp nhận một phần nhỏ yêu cầu (ví dụ ~30%) -> ratio=0.3 -> "prediction": "PARTIAL_B_WIN"
+- Bằng chứng cho thấy bị đơn thắng hoàn toàn, không có căn cứ nào ủng hộ nguyên đơn -> ratio=0.0 -> "prediction": "B_WIN\""""
 
 
 def _format_law_section(chunks: list[RetrievedChunk]) -> str:
