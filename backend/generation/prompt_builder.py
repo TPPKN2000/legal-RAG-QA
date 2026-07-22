@@ -1,6 +1,6 @@
 """
 Final prompt assembly for outcome prediction (design doc §4, §7.1;
-legalrag_adjustments.md §5).
+system_adjustments_v3.md §5).
 
 Enforces the "Grounding & Citation nghiêm ngặt" requirement:
   - The LLM must cite Điều/Khoản/Điểm for every legal claim.
@@ -8,7 +8,7 @@ Enforces the "Grounding & Citation nghiêm ngặt" requirement:
   - Law-provision text is inserted VERBATIM (never compressed — see
     generation/compress.py) so no connective word can be silently dropped.
   - Case-evidence text is NOT passed in raw here anymore. It is pre-condensed
-    by generation/case_digest.py into a short digest (legalrag_adjustments.md
+    by generation/case_digest.py into a short digest (system_adjustments_v3.md
     §5 — this was the biggest single contributor to the ~10k-token final
     prompt, and a <1B generation model degrades faster on long noisy context
     than the previously-planned 8B model would have).
@@ -86,7 +86,7 @@ def build_prediction_prompt(
 
     `case_digest` is the already-condensed case-fact summary produced by
     `generation/case_digest.build_case_digest` — this function no longer
-    accepts raw `CaseEvidenceHit`s (see module docstring, legalrag_adjustments
+    accepts raw `CaseEvidenceHit`s (see module docstring, system_adjustments_v3
     §5).
     """
     law_section = _format_law_section(law_chunks)
