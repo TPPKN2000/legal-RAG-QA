@@ -1,25 +1,62 @@
-pydantic>=2.6
-python-dotenv>=1.0
-requests>=2.31
+# ---------------------------------------------------------------------------
+# LegalRAG dependencies — grouped by pipeline stage, with a comment on which
+# module(s) actually import each package (verified against backend/ source,
+# not just the original design doc). Optional/soft dependencies are marked
+# explicitly; the code has a working fallback path if they're missing.
+# ---------------------------------------------------------------------------
 
-# Embedding / reranking
-sentence-transformers>=3.0
-torch>=2.2
+# --- Core schemas / config -------------------------------------------------
+pydantic>=2.6            # backend/models.py (LawChunk, SubmissionRecord, ...), backend/case_api_client.py
+python-dotenv>=1.0        # backend/config.py: load_dotenv() reads .env at import time
+requests>=2.31            # backend/case_api_client.py: POST /retrieve to the Case Content API
 
-# Generation (HF transformers in-process, per confirmed setup)
-transformers>=4.44
-accelerate>=0.30
+# --- Numeric / array (transitive via torch & sentence-transformers, but
+#     also imported DIRECTLY — must be declared explicitly) -----------------
+numpy>=1.26                # backend/indexing/embed.py: np.zeros(...), .astype("float32")
 
-# Retrieval
-rank_bm25>=0.2.2
-tiktoken>=0.7
+# --- Embedding / reranking ---------------------------------------------------
+sentence-transformers>=3.0  # backend/indexing/embed.py (SentenceTransformer), backend/retrieval/rerank.py (CrossEncoder)
+torch>=2.2                    # backend/models.py (generation model), embed.py, rerank.py — device placement, no_grad, dtype selection
 
-# Vector store
-pinecone>=5.0
+# --- Generation (HF transformers in-process; no vLLM/Ollama server hop) ----
+transformers>=4.44           # backend/models.py (AutoModelForCausalLM, AutoTokenizer, BatchEncoding)
+                              # backend/retrieval/ner.py (pipeline("token-classification", ...))
+accelerate>=0.30              # required by transformers' from_pretrained() device/dtype handling on some setups
 
-# Prompt compression (optional; falls back to sentence truncation if absent)
+# --- Retrieval ----------------------------------------------------------------
+rank_bm25>=0.2.2                # backend/indexing/bm25_index.py (BM25Okapi)
+tiktoken>=0.7                     # backend/ingestion/chunker.py (cl100k_base token counting)
+                                   # OPTIONAL at runtime: chunker.py checks importlib.util.find_spec("tiktoken")
+                                   # first and falls back to a chars/4 heuristic (_fallback_count_tokens) if absent.
+
+# --- Vector store --------------------------------------------------------------
+pinecone>=5.0                       # backend/indexing/vector_store.py (Pinecone, ServerlessSpec, Index)
+
+# --- Prompt compression (OPTIONAL) ----------------------------------------------
+# backend/generation/compress.py imports llmlingua lazily inside a
+# try/except; if it's not installed (or fails to load/compress), it falls
+# back to _sentence_fallback_compress() — a whole-sentence truncation that
+# never cuts a legal clause mid-way. Safe to omit in constrained envs, but
+# COMPRESSION_ENABLED must still be respected (see config.py).
 llmlingua>=0.2.2
 
-# Ingestion of supplementary law documents
-python-docx>=1.1
-pdfplumber>=0.11
+# --- Ingestion of supplementary law documents (.docx / .pdf) --------------------
+# Only exercised by backend/ingestion/parser.py's parse_docx_supplement() /
+# parse_pdf_supplement() — used when a team extends the corpus with law
+# documents not already provided as JSON by the organizers. Not on the
+# critical path for the standard corpus_law_pub.json ingestion flow
+# (scripts/build_index.py never calls these two functions).
+python-docx>=1.1                    # backend/ingestion/parser.py: import docx
+pdfplumber>=0.11                     # backend/ingestion/parser.py: import pdfplumber
+
+# ---------------------------------------------------------------------------
+# NOT required by the current codebase (kept out deliberately):
+#   - No web framework (flask/fastapi/uvicorn): this is a batch CLI pipeline
+#     (backend/submission.py, test/test_all_backend.py), not a served API.
+#   - No langchain / llamaindex: system_design_v0.md's "tự viết, không phụ
+#     thuộc framework RAG" constraint is upheld across backend/.
+#   - No pytest: test/test_all_backend.py is a plain script (argparse +
+#     logging), not a pytest suite. If unit tests are added per
+#     IMPROVEMENT_PLAN.md §3.2 (e.g. mocking case_api_client retries),
+#     add `pytest>=8.0` here at that point — it is not needed today.
+# ---------------------------------------------------------------------------
