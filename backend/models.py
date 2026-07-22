@@ -5,13 +5,6 @@ Single shared module for:
      pipeline stages).
   2. The central LLM loading/generation interface (`generate_text`), used by
      query rewriting, HyDE, and final outcome prediction.
-
-NOTE: an earlier version of this codebase split these into `backend/model.py`
-(singular, LLM loader) and `backend/models.py` (plural, schemas) — a naming
-accident that made every other import in the repo point at whichever file
-didn't have what it needed. Consolidated back into this single file per
-request; every `from backend.models import ...` statement across the repo
-already points here.
 """
 from __future__ import annotations
 
