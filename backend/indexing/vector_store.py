@@ -5,10 +5,6 @@ Per the README, the project uses Pinecone rather than a self-hosted vector
 DB. Metadata filtering (design doc §3.2 — effective/expired provisions,
 document type) is pushed down into Pinecone's native metadata filter so
 expired law is excluded *before* the ANN search runs, not after.
-
-system_adjustments_v4.md §3.1 (SPEED fix, applied here): `_get_index()` is now
-`@lru_cache`d — see its docstring below for why this was the dominant
-source of the ~197s/case average observed in test/test_all_backend.log.
 """
 from __future__ import annotations
 
@@ -46,44 +42,9 @@ def ensure_index() -> None:
         )
 
 
-@lru_cache(maxsize=1)
 def _get_index():
-    """Cache the Index client (system_adjustments_v4.md §3.1).
-
-    Constructing `Pinecone(...).Index(...)` triggers a `describe_index()`
-    network round-trip inside the SDK, and `ensure_index()` above adds a
-    `list_indexes()` round-trip on top of that. Before this fix, `_get_index()`
-    had NO caching (unlike `_get_client()`, which already used `lru_cache`),
-    so it re-paid both round-trips on *every single call* to `query()` /
-    `upsert_chunks()` / `delete_namespace()`.
-
-    With ~14-30 `vector_store.query()` calls per case (BM25+vector run for
-    every query-rewrite variant, every decomposed sub-query, and again in
-    the retrieval-evaluator's extra round when triggered), that redundant
-    network chatter was the dominant cost in the ~197s/case average recorded
-    in test/test_all_backend.log — the log shows "Listing indexes" firing
-    30+ times per case, once per call, instead of once per process.
-
-    This is a pure caching change: it does not alter retrieval logic,
-    filtering, or results. See `reset_index_cache()` below for the one case
-    (re-creating/renaming the index mid-process) where the cache needs to be
-    invalidated.
-    """
     ensure_index()
     return _get_client().Index(config.PINECONE_INDEX_NAME)
-
-
-def reset_index_cache() -> None:
-    """Invalidate the cached Pinecone client/Index.
-
-    Only needed if a single process needs to point at a different index or
-    re-create one that was just deleted (e.g. a test suite that calls
-    `delete_namespace()` then rebuilds under a different
-    `config.PINECONE_INDEX_NAME`) — normal query/upsert usage never needs
-    this.
-    """
-    _get_index.cache_clear()
-    _get_client.cache_clear()
 
 
 def _chunk_metadata(chunk: LawChunk, extra: Optional[dict] = None) -> dict:

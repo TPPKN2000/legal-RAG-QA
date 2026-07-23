@@ -17,7 +17,12 @@ tiktoken>=0.7
 # Vector store
 pinecone>=5.0
 
-# Prompt compression (optional; falls back to sentence truncation if absent)
+# Prompt compression (ACTION_PLAN.md §C5: currently UNUSED — nothing in
+# backend/pipeline.py calls generation/compress.py anymore, that role moved
+# to generation/case_digest.py's LLM-summarization approach. Kept installed
+# because compress.py itself was intentionally kept rather than deleted; see
+# that module's docstring for the reasoning. Safe to drop this line if
+# compress.py is ever deleted too.)
 llmlingua>=0.2.2
 
 # Ingestion of supplementary law documents

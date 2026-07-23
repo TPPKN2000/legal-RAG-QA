@@ -1,5 +1,5 @@
 """
-Case-fact digest step (design doc §7.1 follow-up; system_adjustments_v3.md
+Case-fact digest step (design doc §7.1 follow-up; legalrag_adjustments.md
 §5).
 
 Why this exists: the ~10k-token final generation prompt did not come from

@@ -14,9 +14,22 @@ Key constraints encoded here:
 system_adjustments_v4.md §3.2 (BUDGET INTEGRITY fix, applied here): the call
 counter now increments exactly once per logical `retrieve()` invocation,
 not once per HTTP attempt inside it — see `retrieve()`'s inline comment.
+
+ACTION_PLAN.md §A2 (applied here): any HTTP status code outside the
+explicitly-handled set (200 / 429 / 503 / 403 / 422) — most notably 404 —
+used to fall through to `resp.raise_for_status()`, which raises
+`requests.HTTPError`, NOT `CaseAPIError`. `pipeline.collect_case_evidence()`
+only catches `CaseAPIError`, so an unexpected status code propagated all the
+way up to `submission.run()`/`test_all_backend.py` and sacrificed the
+*entire case* (not just the one query) to a conservative fallback — observed
+directly in submission_pri.log for case_6551 (a bare 404). Such codes are
+now treated the same as "this query returned no evidence": logged as a
+warning and returned as `None`, so the remaining query variants for that
+case can still run.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import defaultdict
@@ -26,6 +39,8 @@ import requests
 
 from backend import config
 from backend.models import CaseEvidenceHit
+
+log = logging.getLogger(__name__)
 
 
 class CaseAPIError(RuntimeError):
@@ -78,7 +93,8 @@ class CaseContentAPIClient:
 
     def retrieve(self, query: str, case_id: str) -> CaseEvidenceHit | None:
         """POST /retrieve -> the single top-ranked segment, or None if the
-        API returned an empty result set (still counts as a call)."""
+        API returned an empty result set or an unexpected status code
+        (still counts as a call in both cases)."""
         if not self.token:
             raise CaseAPIError(
                 "ALQAC_TOKEN is not set. Add it to your .env file (see README §Configuration)."
@@ -128,7 +144,19 @@ class CaseContentAPIClient:
                 raise CaseAPIError("403 Forbidden — missing or invalid X-API-Key.")
             if resp.status_code == 422:
                 raise CaseAPIError(f"422 Malformed request: query={query!r} case_id={case_id!r}")
-            resp.raise_for_status()
+
+            # ACTION_PLAN.md §A2: any other status code (404, 500, 502, ...)
+            # is treated as "this query has no evidence" rather than raised —
+            # raising here (via resp.raise_for_status(), the old behavior)
+            # produces a bare requests.HTTPError that collect_case_evidence()
+            # doesn't catch (it only catches CaseAPIError), which sacrifices
+            # the whole case instead of just this one query variant.
+            log.warning(
+                "case_api_client.retrieve: unexpected status %s for case=%s query=%r — "
+                "treating as no-evidence for this query, not failing the whole case",
+                resp.status_code, case_id, query,
+            )
+            return None
 
         raise CaseAPIError(f"/retrieve failed after {self.max_retries} attempts: {last_exc}")
 # Process-wide singleton — see class docstring for why this must be shared.

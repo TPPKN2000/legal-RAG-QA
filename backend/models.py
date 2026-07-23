@@ -5,6 +5,13 @@ Single shared module for:
      pipeline stages).
   2. The central LLM loading/generation interface (`generate_text`), used by
      query rewriting, HyDE, and final outcome prediction.
+
+NOTE: an earlier version of this codebase split these into `backend/model.py`
+(singular, LLM loader) and `backend/models.py` (plural, schemas) — a naming
+accident that made every other import in the repo point at whichever file
+didn't have what it needed. Consolidated back into this single file per
+request; every `from backend.models import ...` statement across the repo
+already points here.
 """
 from __future__ import annotations
 
@@ -128,7 +135,7 @@ def _get_generation_model():
     lifetime. HF `transformers` is loaded in-process per the confirmed
     choice (no vLLM/Ollama server hop).
 
-    system_adjustments_v3.md §2 — safety notes for the <1B generation model
+    legalrag_adjustments.md §2 — safety notes for the <1B generation model
     (previously Qwen3-8B, now config.GENERATION_MODEL_NAME, confirmed
     Qwen3.5-0.8B-class):
       - No `device_map`: that kwarg exists to shard a large model across
@@ -205,7 +212,7 @@ def generate_text(
     ]
     template_kwargs = dict(add_generation_prompt=True, return_tensors="pt")
     try:
-        # system_adjustments_v3.md §2 point 3: Qwen3-family chat templates
+        # legalrag_adjustments.md §2 point 3: Qwen3-family chat templates
         # default "thinking" mode on, which can burn the whole
         # max_new_tokens budget on a <think>...</think> block before any
         # JSON is emitted. Explicitly disable it (config-controlled).

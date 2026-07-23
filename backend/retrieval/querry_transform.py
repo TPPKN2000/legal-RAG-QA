@@ -21,9 +21,22 @@ statute-styled prose, which keeps hallucinated legal content out of the
 retrieval query entirely. See backend/retrieval/hybrid_search.py for how the
 decomposed sub-queries are fused (weighted RRF, Judge-R1-style) with the
 standard BM25/vector routes.
+
+ACTION_PLAN.md §C1 (SPEED, applied here): `rewrite_query()`'s default
+`n_variants` now comes from `config.QUERY_REWRITE_MAX_VARIANTS` (2) instead
+of a hardcoded 4. Every additional variant doubles the BM25+vector channel
+count for that call (see hybrid_search.py), and — before this fix — the
+retrieval-evaluator's extra round in pipeline.py called hybrid_search() once
+per decomposed sub-query with rewriting still enabled by default, so this
+single hardcoded "4" was silently multiplying query fan-out at two different
+places in the pipeline. `pipeline.collect_case_evidence()` still passes its
+own explicit `n_variants=budget-1` for Case Content API query variants,
+which is a different budget entirely and is unaffected by this default
+change.
 """
 from __future__ import annotations
 
+from backend import config
 from backend.models import generate_text
 
 _REWRITE_SYSTEM_PROMPT = (
@@ -43,7 +56,11 @@ _DECOMPOSE_SYSTEM_PROMPT = (
 )
 
 
-def rewrite_query(query: str, n_variants: int = 4, max_new_tokens: int = 256) -> list[str]:
+def rewrite_query(
+    query: str,
+    n_variants: int = config.QUERY_REWRITE_MAX_VARIANTS,
+    max_new_tokens: int = 256,
+) -> list[str]:
     """Return `query` plus up to `n_variants` legal-register paraphrases.
 
     Falls back to just [query] if generation fails for any reason — a failed

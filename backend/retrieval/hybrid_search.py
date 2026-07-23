@@ -10,9 +10,9 @@ that by fusing on *rank* instead of raw score.
 default from the original RRF paper) that keeps a single retriever's #1 hit
 from completely dominating the fused ranking. `weight_r` defaults to 1.0 for
 every channel; the query-decomposition channel gets a higher weight (see
-system_adjustments_v3.md §3 / §7 "Weighted RRF theo Judge-R1").
+legalrag_adjustments.md §3 / §7 "Weighted RRF theo Judge-R1").
 
-system_adjustments_v3.md §3 — HyDE removed. It used to be a 3rd retrieval
+legalrag_adjustments.md §3 — HyDE removed. It used to be a 3rd retrieval
 channel here (a generated hypothetical statute passage, embedded and
 searched). It has been replaced with two non-generative-content additions:
   1. NER-based entity masking of the query used for LAW retrieval (plaintiff

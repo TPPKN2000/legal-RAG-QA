@@ -25,6 +25,20 @@ each article's title) before comparing against gold — see its docstring for
 the residual approximation this still carries (article-number-only
 matching, since the public gold set doesn't expose law_id).
 
+ACTION_PLAN.md §A4 (applied here): the original §3.3 fix only matched
+"Điều N" against `art.title`, and fell back to treating `aid` itself as the
+article number ONLY when `aid < 1000` — otherwise it skipped the article
+(`continue`) entirely, leaving it out of the map. Since most real `aid`
+values observed in test_submission_backend.json are >= 1000 (e.g. 50882,
+53082), any article whose `title` didn't carry a parseable "Điều N" was
+silently dropped from the map, which is why coverage was only ~245 entries
+and Micro Law F1 stayed at 0.000. The fix below also searches the article
+`body` for "Điều N" before giving up, since some corpus releases only put
+the article number in the body's first line rather than in a separate
+`title` field, and removes the `aid < 1000` guess in favor of that more
+principled fallback. A coverage summary is logged so this can be verified
+against the real corpus once available.
+
 system_adjustments_v4.md §3.4 (ACCURACY fix, applied here): the harness now uses
 `backend.pipeline.process_case_with_debug()` instead of `process_case()` and
 reports the fallback rate (how many cases were forced to B_WIN by a
@@ -64,6 +78,10 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("transformers").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
+# ACTION_PLAN.md §A4: shared pattern for extracting a Vietnamese "Điều N"
+# article number from either an article's title or its body text.
+_RE_DIEU_NUM = re.compile(r"Điều\s+(\d+)", re.IGNORECASE)
+
 
 def parse_gold_law_provisions(related_law_text: str) -> list[dict]:
     """Parse the public test set's 'related_law_provisions' field into
@@ -78,7 +96,7 @@ def parse_gold_law_provisions(related_law_text: str) -> list[dict]:
         if not line or "|" not in line:
             continue
         law_name, article_part = (p.strip() for p in line.split("|", 1))
-        m = re.search(r"Điều\s+(\d+)", article_part)
+        m = _RE_DIEU_NUM.search(article_part)
         if m:
             provisions.append({"law_name": law_name, "article_num": int(m.group(1))})
     return provisions
@@ -86,7 +104,7 @@ def parse_gold_law_provisions(related_law_text: str) -> list[dict]:
 
 def build_aid_to_article_num_map(corpus_path) -> dict[tuple[str, int], int]:
     """system_adjustments_v4.md §3.3: map (law_id, aid) -> the "Điều N" article
-    number parsed from that article's title in the real law corpus.
+    number parsed from that article in the real law corpus.
 
     Root cause this fixes: predicted `law_evidence` reports (law_id, aid)
     straight from the corpus, where `aid` is a global sequential/composite
@@ -107,6 +125,16 @@ def build_aid_to_article_num_map(corpus_path) -> dict[tuple[str, int], int]:
     organizers' real law_id-aware scoring, but it at least puts both sides
     in a namespace where a match is possible at all.
 
+    ACTION_PLAN.md §A4: coverage was previously very low (~245 entries
+    observed) because articles whose `title` didn't carry a parseable
+    "Điều N" AND whose `aid >= 1000` were silently skipped (`continue`),
+    never entering the map at all. This version also checks the article
+    `body` (some corpus releases only state the article number in the body's
+    first line, not in a separate `title` field) before giving up on an
+    article, and logs a coverage summary (title-matched / body-matched /
+    unmatched) so the real coverage can be verified once corpus_law_pub.json
+    is available to run this against.
+
     Returns {} (and logs a warning) if the corpus can't be loaded, so
     callers degrade to the old raw-aid comparison rather than crashing.
     """
@@ -123,24 +151,36 @@ def build_aid_to_article_num_map(corpus_path) -> dict[tuple[str, int], int]:
         return {}
 
     mapping: dict[tuple[str, int], int] = {}
+    n_matched_title = 0
+    n_matched_body = 0
+    n_unmatched = 0
     for doc in docs:
         for art in doc.articles:
-            m = re.search(r"Điều\s+(\d+)", art.title or "")
+            m = _RE_DIEU_NUM.search(art.title or "")
             if m:
-                article_num = m.group(1)
-                article_num = int(article_num)
-            elif art.aid < 1000:
-                # No parseable "Điều N" in the title — fall back to treating
-                # the corpus aid itself as the article number IF it's in a
-                # plausible range for Vietnamese statute numbering (a few
-                # hundred at most). Keeps the mapping usable for corpora
-                # where aid genuinely *is* the article number, without
-                # silently mis-mapping the large composite-ID case this fix
-                # targets (those are excluded by the < 1000 guard).
-                article_num = art.aid
-            else:
+                mapping[(doc.law_id, art.aid)] = int(m.group(1))
+                n_matched_title += 1
                 continue
-            mapping[(doc.law_id, art.aid)] = article_num
+
+            # ACTION_PLAN.md §A4: title didn't carry "Điều N" — try the
+            # article body before giving up. This replaces the previous
+            # `elif art.aid < 1000: article_num = art.aid` guess, which was
+            # an arbitrary heuristic that happened to exclude almost every
+            # real article observed in practice (most real aids are >= 1000).
+            m = _RE_DIEU_NUM.search(art.body or "")
+            if m:
+                mapping[(doc.law_id, art.aid)] = int(m.group(1))
+                n_matched_body += 1
+                continue
+
+            n_unmatched += 1
+
+    n_total = n_matched_title + n_matched_body + n_unmatched
+    log.info(
+        "aid->article_num map coverage (system_adjustments_v4.md §3.3 / ACTION_PLAN.md §A4): "
+        "%d/%d matched via title, %d/%d matched via body, %d/%d unmatched",
+        n_matched_title, n_total, n_matched_body, n_total, n_unmatched, n_total,
+    )
     return mapping
 
 
@@ -242,8 +282,9 @@ def main():
     generate_text(system_prompt="ping", user_prompt="ping", max_new_tokens=4, temperature=0.0)
     log.info("Model warm-up done in %.1fs", time.time() - t0)
 
-    # system_adjustments_v4.md §3.3: build the (law_id, aid) -> article_num map
-    # once, from the real corpus, before the loop.
+    # system_adjustments_v4.md §3.3 / ACTION_PLAN.md §A4: build the
+    # (law_id, aid) -> article_num map once, from the real corpus, before
+    # the loop.
     aid_map = build_aid_to_article_num_map(config.LAW_CORPUS_PATH)
     if aid_map:
         log.info("Built aid->article_num map from corpus: %d entries (system_adjustments_v4.md §3.3)", len(aid_map))
@@ -330,6 +371,8 @@ def main():
                 "is_fallback": bool(debug.get("is_fallback", False)),
                 "fallback_reason": debug.get("fallback_reason"),
                 "confidence": debug.get("confidence"),
+                # ACTION_PLAN.md §C2
+                "all_citations_hallucinated": bool(debug.get("all_citations_hallucinated", False)),
             }
         )
         log.info(
@@ -369,6 +412,18 @@ def main():
         log.info("Top fallback reasons: %s", reasons.most_common(5))
     non_fallback_predictions = Counter(r["prediction"] for r in results if not r["is_fallback"])
     log.info("Prediction distribution EXCLUDING fallbacks: %s", non_fallback_predictions)
+
+    # ACTION_PLAN.md §C2: report how often the model cited SOMETHING but it
+    # was entirely outside the retrieved law evidence — this is the signal
+    # that motivated raising config.FINAL_LAW_TOP_K (5 -> 8) and is worth
+    # tracking over time to see whether that mitigation actually helps, or
+    # whether the root cause needs a retrieval-side fix instead.
+    n_citation_miss = sum(1 for r in results if r["all_citations_hallucinated"])
+    log.info(
+        "All-citations-hallucinated rate (model cited something, none survived "
+        "verification -> likely retrieval miss, not model invention): %d/%d (%.1f%%)",
+        n_citation_miss, n, 100 * n_citation_miss / n if n else 0.0,
+    )
 
     # system_adjustments_v3.md §4: docs/evaluation.md §2.6 defines Law F1 as a
     # MICRO average — pool TP/FP/FN across the whole test set first, THEN
@@ -412,14 +467,22 @@ def main():
     # DEFAULT_MAX_API_CALLS_PER_CASE fallback pipeline.py itself falls back
     # to, purely so the "effective budget" being measured against matches
     # what the pipeline actually used.
+    # ACTION_PLAN.md §C3: config.API_HARD_CEILING_MULTIPLIER (and
+    # config.API_BUDGET_MULTIPLIER) used to be dead config — this function
+    # hardcoded "2 *" / "5 *" directly instead of reading them, even though
+    # docs/evaluation.md §2.4's B_i=2*n_i / ceiling=5*n_i are exactly what
+    # those two settings represent. Reading them here means a change to
+    # either .env value (or config.py's defaults) is actually reflected in
+    # this estimate instead of silently being ignored.
     def _e_i(api_calls: int, budget_n: int) -> float:
-        b_i = 2 * budget_n
-        ceiling = 5 * budget_n
+        b_i = config.API_BUDGET_MULTIPLIER * budget_n
+        ceiling = config.API_HARD_CEILING_MULTIPLIER * budget_n
+        penalty_range = ceiling - b_i
         if api_calls <= b_i:
             return 1.0
         if api_calls >= ceiling:
             return 0.0
-        return 1 - (api_calls - b_i) / (3 * budget_n)
+        return 1 - (api_calls - b_i) / penalty_range
 
     e_i_values = [
         _e_i(r["api_calls"], r["n_segments"] or config.DEFAULT_MAX_API_CALLS_PER_CASE)

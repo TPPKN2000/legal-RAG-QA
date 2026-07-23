@@ -87,7 +87,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Only process the first N cases (debugging)")
     args = parser.parse_args()
 
-    # system_adjustments_v3.md §1 (guideline.txt cross-check): the leaderboard
+    # legalrag_adjustments.md §1 (guideline.txt cross-check): the leaderboard
     # only accepts 3 submissions/day. This script just writes a local JSON
     # file (it does not submit anything itself), but it's easy to forget
     # that and burn attempts re-uploading near-identical reruns — a cheap

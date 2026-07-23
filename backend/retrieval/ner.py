@@ -1,6 +1,6 @@
 """
 Named-entity recognition helper (design doc / pipeline.txt step 2,
-system_adjustments_v3.md §3).
+legalrag_adjustments.md §3).
 
 Used for two purposes:
   1. `mask_person_org_entities` — strip plaintiff/defendant names and

@@ -80,7 +80,17 @@ BM25_TOP_K = _env_int("BM25_TOP_K", 30)
 VECTOR_TOP_K = _env_int("VECTOR_TOP_K", 30)
 RRF_K = _env_int("RRF_K", 60)  # standard RRF damping constant
 RERANK_TOP_K = _env_int("RERANK_TOP_K", 20)
-FINAL_LAW_TOP_K = _env_int("FINAL_LAW_TOP_K", 5)
+# ACTION_PLAN.md §C2: raised from 5 -> 8. In the 50-case baseline run, ~18%
+# of cases (9/50) had ALL law citations stripped by generate.py's
+# hallucination guard (the model cited something outside the top-5 it was
+# shown), suggesting the correct provision sometimes ranks just outside the
+# final cut rather than the model inventing it outright. Widening the final
+# window gives the reranker more room to keep the right provision without
+# changing retrieval/rerank logic itself. RERANK_TOP_K=20 stays the ceiling
+# this can be pushed toward. This is a mitigation, not a fix for the root
+# cause — see generate.py's `all_citations_hallucinated` instrumentation
+# (added alongside this) for measuring whether it actually helps.
+FINAL_LAW_TOP_K = _env_int("FINAL_LAW_TOP_K", 8)
 
 # --- Query transformation (system_adjustments_v3.md §3) ---------------------
 # HyDE was removed: it asked the LLM to draft a hypothetical *statute-styled*
@@ -95,6 +105,20 @@ QUERY_DECOMPOSITION_MAX_SUBQUERIES = _env_int("QUERY_DECOMPOSITION_MAX_SUBQUERIE
 # the decomposed/planned-query route (agentic route had much higher P@5).
 RRF_WEIGHT_STANDARD = _env_float("RRF_WEIGHT_STANDARD", 1.0)
 RRF_WEIGHT_AGENT = _env_float("RRF_WEIGHT_AGENT", 2.0)
+# ACTION_PLAN.md §C1 (SPEED): number of legal-register paraphrase variants
+# `rewrite_query()` generates on top of the original query. This used to be
+# hardcoded to 4 inside querry_transform.py, meaning every hybrid_search()
+# call ran BM25+vector for up to 5 queries (10 channels) before even adding
+# the decomposition channels — and the retrieval-evaluator's extra round
+# used to call hybrid_search() again per decomposed sub-query WITH rewriting
+# still on, multiplying that fan-out by up to QUERY_DECOMPOSITION_MAX_SUBQUERIES
+# on top. Lowered to 2 by default: after system_adjustments_v4.md §3.1 fixed
+# the Pinecone connection-caching overhead, the remaining ~125s/case was
+# dominated by sheer query COUNT, not per-query latency, so this is the
+# lever that actually moves it. See hybrid_search.py and pipeline.py's
+# retrieval-evaluator loop for where this and the (now rewriting-disabled)
+# evaluator round are wired up.
+QUERY_REWRITE_MAX_VARIANTS = _env_int("QUERY_REWRITE_MAX_VARIANTS", 2)
 
 # --- Retrieval evaluator loop (system_adjustments_v3.md §7) ------------------
 # Reuses the existing cross-encoder rerank score as a cheap "is this good
@@ -105,8 +129,6 @@ RETRIEVAL_EVALUATOR_ENABLED = _env("RETRIEVAL_EVALUATOR_ENABLED", "true").lower(
 RETRIEVAL_EVALUATOR_SCORE_THRESHOLD = _env_float("RETRIEVAL_EVALUATOR_SCORE_THRESHOLD", 0.75)
 
 # --- Chunking --------------------------------------------------------------
-CHILD_CHUNK_MAX_TOKENS = _env_int("CHILD_CHUNK_MAX_TOKENS", 220)
-PARENT_CHUNK_MAX_TOKENS = _env_int("PARENT_CHUNK_MAX_TOKENS", 1000)
 # system_adjustments_v3.md §6b: soft-split an oversized Khoản/Điểm on sentence
 # boundaries (never hard token cuts) once it exceeds this many characters.
 # ~900 chars ≈ ViDRILL's 450-word threshold for Vietnamese legal text.

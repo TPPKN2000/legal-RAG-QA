@@ -1,6 +1,26 @@
 """
 Prompt compression (design doc §4.2).
 
+ACTION_PLAN.md §C5 — STATUS: CURRENTLY UNUSED, KEPT INTENTIONALLY.
+`pipeline.py` no longer calls `compress_case_evidence()` — that role was
+taken over by `generation/case_digest.py` (system_adjustments_v3.md §5),
+which condenses case-evidence text via an LLM digest instead of LLMLingua
+token pruning. Nothing in the current `backend/` call graph imports this
+module.
+
+Decision (per ACTION_PLAN.md §C5's "xoá hẳn hay giữ làm tuỳ chọn tương lai"):
+KEPT rather than deleted, for two reasons:
+  1. It documents a real, still-relevant legal-domain constraint (never
+     compress verbatim law-provision text) that a future contributor may
+     need again if `case_digest.py`'s LLM-summarization approach is ever
+     swapped back for a lighter-weight compression pass — deleting it would
+     mean re-deriving that same domain rule from scratch.
+  2. It is self-contained (no other module imports it, so keeping it costs
+     nothing at runtime) and already carries its own safety documentation.
+If this is still unused after the next architecture pass, the
+recommendation is to delete it then, together with the `llmlingua` entry in
+requirements.txt (see that file's comment, also updated for §C5).
+
 CRITICAL legal-domain rule: NEVER compress the verbatim text of a law
 provision. Losing a connective like "trừ trường hợp" ("except in the case
 of") or "ngoại trừ" ("excluding") can invert the meaning of a clause. Only
@@ -63,5 +83,8 @@ def compress_case_evidence(evidence_texts: list[str], target_ratio: float = conf
     they are central to the *factual* reasoning — they are compressible,
     unlike law-provision text, because paraphrasing a witness statement
     doesn't change which statute applies, only how much detail survives.
+
+    NOTE (ACTION_PLAN.md §C5): not called anywhere in the current pipeline —
+    see module docstring.
     """
     return [compress_auxiliary_text(t, target_ratio) for t in evidence_texts]

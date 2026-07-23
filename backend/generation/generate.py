@@ -42,6 +42,20 @@ IMPROVEMENT_PLAN.md §3.4 (ACCURACY fix, applied here):
      less prone to collapsing onto a "safe-looking" default under
      uncertainty (observed: A_WIN/PARTIAL_B_WIN never once appeared across
      50 public-test cases before this fix).
+
+ACTION_PLAN.md Nhóm A (applied here):
+  - A1: `_label_from_ratio()`'s A_WIN threshold lowered from `ratio > 0.99`
+    to `ratio >= 0.9`. Observed model behavior only ever emits
+    `accepted_ratio_estimate` of 0.95/0.99 when confident — it essentially
+    never crosses 0.99 — so the >0.99 threshold silently downgraded 33/50
+    (66%) of cases from the categorical "A_WIN" pick to "PARTIAL_A_WIN" via
+    the ratio-derived override, defeating the very mechanism §3.4 added to
+    fix label collapse.
+  - A3: `_extract_json()` now runs a light JSON-repair pass (inserting a
+    missing comma between adjacent `{...}{...}` objects) before parsing,
+    since the observed parse failures were consistently a missing comma
+    inside the `law_citations` array — a small model's typical mistake when
+    emitting a JSON array of nested objects.
 """
 from __future__ import annotations
 
@@ -79,14 +93,39 @@ class OutcomePrediction:
     # B_WIN", which the raw submission schema can't distinguish.
     is_fallback: bool = False
     fallback_reason: str | None = None
+    # ACTION_PLAN.md §C2: True iff the model offered at least one citation
+    # (`law_citations` was non-empty in its raw output) but NONE of them
+    # survived the hallucination guard (allowed_citation_keys). This is a
+    # different signal than "the model cited nothing" — it means the model
+    # tried to ground its answer and named a provision that simply wasn't in
+    # the top-`config.FINAL_LAW_TOP_K` retrieved set, which points at a
+    # retrieval miss rather than the model inventing content from nothing.
+    # Baseline observed this in ~18% (9/50) of cases; see pipeline.py's
+    # process_case_with_debug() for how this is logged/surfaced.
+    all_citations_hallucinated: bool = False
 
 
 def _extract_json(raw: str) -> dict:
     """The model is instructed to return ONLY JSON, but LLMs sometimes wrap
     it in prose or a code fence anyway — extract the first {...} block
-    defensively rather than trusting `json.loads(raw)` directly."""
+    defensively rather than trusting `json.loads(raw)` directly.
+
+    ACTION_PLAN.md §A3: also runs a light JSON-repair pass first. The
+    observed parse failures (case_2035, case_6284, case_8784, case_2603,
+    case_4584, ...) were consistently `Expecting ',' delimiter` on the line
+    containing `law_citations`, i.e. the model emitted two adjacent objects
+    in the array without a separating comma
+    (`{"law_id":"A","aid":1} {"law_id":"B","aid":2}`). Inserting the missing
+    comma between adjacent `}...{` pairs is a narrow, low-risk repair: it
+    only fires on a pattern that is never valid JSON on its own, so it can't
+    silently corrupt an already-valid payload.
+    """
     raw = raw.strip()
     raw = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
+    # JSON-repair: insert a missing comma between two adjacent objects in an
+    # array — the typical mistake a small model makes when emitting a JSON
+    # array of nested objects (ACTION_PLAN.md §A3).
+    raw = re.sub(r"\}\s*\{", "}, {", raw)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -128,8 +167,17 @@ def _parse_ratio(raw_ratio) -> float | None:
 
 
 def _label_from_ratio(ratio: float) -> Prediction:
-    """Fixed thresholds mirroring prompt_builder.SYSTEM_PROMPT rule #5."""
-    if ratio > 0.99:
+    """Fixed thresholds mirroring prompt_builder.SYSTEM_PROMPT rule #5.
+
+    ACTION_PLAN.md §A1: the A_WIN threshold was lowered from `ratio > 0.99`
+    to `ratio >= 0.9`. In practice the model only ever emits 0.95 or 0.99
+    when it is confident the plaintiff fully prevails — it essentially never
+    crosses 0.99 — so the old strict `> 0.99` threshold caused the
+    ratio-derived override to downgrade a genuine "A_WIN" categorical pick
+    to "PARTIAL_A_WIN" in 33/50 (66%) of observed cases. That defeated the
+    §3.4 mechanism's own purpose (avoiding label collapse away from A_WIN).
+    """
+    if ratio >= 0.9:
         return "A_WIN"
     if ratio > 0.5:
         return "PARTIAL_A_WIN"
@@ -205,6 +253,12 @@ def predict_outcome(
         )
         confidence = min(confidence, _UNGROUNDED_CONFIDENCE_CEILING)
 
+    # ACTION_PLAN.md §C2: the model tried to cite something (raw_citations
+    # non-empty) but nothing survived the hallucination guard (kept empty) —
+    # see the field's docstring on OutcomePrediction for why this is tracked
+    # separately from "model cited nothing at all".
+    all_citations_hallucinated = bool(raw_citations) and not kept
+
     return OutcomePrediction(
         prediction=prediction,
         law_citations=kept,
@@ -213,4 +267,5 @@ def predict_outcome(
         dropped_hallucinated_citations=dropped,
         is_fallback=False,
         fallback_reason=None,
+        all_citations_hallucinated=all_citations_hallucinated,
     )

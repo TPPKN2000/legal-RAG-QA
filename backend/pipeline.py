@@ -22,6 +22,20 @@ small debug dict (`is_fallback`, `fallback_reason`, `confidence`,
 byte-for-byte compatible with docs/submission_example.json — so callers that
 need this instrumentation (test/test_all_backend.py's fallback-rate report)
 call `process_case_with_debug()` directly instead.
+
+ACTION_PLAN.md §C1 (SPEED, applied here): `collect_law_evidence()`'s
+retrieval-evaluator extra round now calls `hybrid_search(..., use_query_rewriting=False)`
+in addition to the existing `use_decomposition=False` — see that function's
+inline comment for why this mattered far more than it looks (a hidden
+multiplicative fan-out, not just an additive one).
+
+ACTION_PLAN.md §C2 (applied here): `process_case_with_debug()`'s debug dict
+now also carries `all_citations_hallucinated`, sourced from
+`generate.OutcomePrediction`, so the local eval harness can report how often
+the model cited *something* but nothing survived the hallucination guard —
+the signal that distinguishes "retrieval missed the right provision" from
+"model didn't try to cite anything at all" (see generate.py for the field's
+own docstring).
 """
 from __future__ import annotations
 
@@ -158,7 +172,28 @@ def collect_law_evidence(query_text: str) -> list[RetrievedChunk]:
         if sub_queries:
             extra_candidates: list[RetrievedChunk] = []
             for sub_q in sub_queries:
-                extra_candidates.extend(hybrid_search(sub_q, top_k=config.RERANK_TOP_K, use_decomposition=False))
+                # ACTION_PLAN.md §C1 (SPEED): also disable query rewriting
+                # here, not just decomposition. Each decomposed sub-query is
+                # already a short, specific legal-aspect question — running
+                # it back through rewrite_query() (up to
+                # config.QUERY_REWRITE_MAX_VARIANTS extra paraphrases, each
+                # spawning its own BM25+vector channel pair) re-introduces
+                # the exact fan-out this "cheap" evaluator round was meant to
+                # avoid, multiplied by up to QUERY_DECOMPOSITION_MAX_SUBQUERIES
+                # sub-queries. Before this fix, a single evaluator-triggered
+                # case could add on the order of
+                # QUERY_DECOMPOSITION_MAX_SUBQUERIES * (2 + 2*QUERY_REWRITE_MAX_VARIANTS)
+                # extra BM25/vector calls; with rewriting off here it's just
+                # QUERY_DECOMPOSITION_MAX_SUBQUERIES * 2 (one BM25 + one
+                # vector call per sub-query).
+                extra_candidates.extend(
+                    hybrid_search(
+                        sub_q,
+                        top_k=config.RERANK_TOP_K,
+                        use_query_rewriting=False,
+                        use_decomposition=False,
+                    )
+                )
 
             merged = {c.chunk_id: c for c in candidates}
             for c in extra_candidates:
@@ -178,7 +213,8 @@ def process_case_with_debug(case: CaseQuery) -> tuple[SubmissionRecord, dict]:
     """Same work as `process_case()`, but also returns a debug dict carrying
     fields that don't belong on `SubmissionRecord` (system_adjustments_v4.md
     §3.4): `is_fallback`, `fallback_reason`, `confidence`,
-    `dropped_hallucinated_citations`. Intended for local evaluation harnesses
+    `dropped_hallucinated_citations`, and (ACTION_PLAN.md §C2)
+    `all_citations_hallucinated`. Intended for local evaluation harnesses
     (test/test_all_backend.py); `backend.submission` should keep using the
     plain `process_case()` below since only the strict submission schema
     matters there.
@@ -201,6 +237,17 @@ def process_case_with_debug(case: CaseQuery) -> tuple[SubmissionRecord, dict]:
             "case=%s: dropped %d citation(s) not present in retrieved law evidence",
             case.case_id, outcome.dropped_hallucinated_citations,
         )
+    if outcome.all_citations_hallucinated:
+        # ACTION_PLAN.md §C2: the model DID try to cite provisions, but none
+        # of them were in the set it was actually shown — this is the
+        # "retrieval likely missed the right article" signal, distinct from
+        # the model simply not citing anything.
+        log.warning(
+            "case=%s: model offered citation(s) but ALL were outside the retrieved "
+            "law evidence — likely a retrieval miss, not a model hallucination "
+            "in the colloquial sense (ACTION_PLAN.md §C2)",
+            case.case_id,
+        )
     if outcome.is_fallback:
         log.warning("case=%s: forced fallback prediction (%s)", case.case_id, outcome.fallback_reason)
 
@@ -215,6 +262,7 @@ def process_case_with_debug(case: CaseQuery) -> tuple[SubmissionRecord, dict]:
         "fallback_reason": outcome.fallback_reason,
         "confidence": outcome.confidence,
         "dropped_hallucinated_citations": outcome.dropped_hallucinated_citations,
+        "all_citations_hallucinated": outcome.all_citations_hallucinated,
     }
     return record, debug
 
