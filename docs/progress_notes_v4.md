@@ -1,4 +1,4 @@
-# LegalRAG — Kế hoạch hành động tổng hợp (ACTION_PLAN.md)
+# LegalRAG — Kế hoạch thực hiện
 
 **Mục đích:** gộp toàn bộ phát hiện + đề xuất từ 3 lần phân tích log (`test_all_backend.log` gốc, `submission_pri.log`, `test_all_backend (2).log`) và phần thảo luận di trú sang Llama-3.1-8B-Instruct/NVIDIA NIM, thành **một danh sách việc cần làm duy nhất, có trạng thái, có patch code, có tiêu chí chấp nhận** — để một coding agent hoặc người kế nhiệm đọc là bắt tay làm được ngay, không cần lục lại toàn bộ lịch sử hội thoại.
 
