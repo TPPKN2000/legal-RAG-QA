@@ -3,9 +3,8 @@
 **Mục đích:** gộp toàn bộ phát hiện + đề xuất từ 3 lần phân tích log (`test_all_backend.log` gốc, `submission_pri.log`, `test_all_backend (2).log`) và phần thảo luận di trú sang Llama-3.1-8B-Instruct/NVIDIA NIM, thành **một danh sách việc cần làm duy nhất, có trạng thái, có patch code, có tiêu chí chấp nhận** — để một coding agent hoặc người kế nhiệm đọc là bắt tay làm được ngay, không cần lục lại toàn bộ lịch sử hội thoại.
 
 **Quan hệ với các tài liệu khác:**
-- `IMPROVEMENT_PLAN.md` — bản gốc, chỉ chứa 4 mục 3.1–3.4 dựa trên lần chạy đầu tiên. Tài liệu này **kế thừa và cập nhật trạng thái** 4 mục đó, đồng thời bổ sung các phát hiện mới.
 - `docs/system_adjustments_v4.md` — vẫn là nguồn tham chiếu chẩn đoán gốc cho 4 mục 3.1–3.4.
-- `README.md`, `requirements.txt`, `docs/test_design.md` — **cần cập nhật lại theo Nhóm D bên dưới**, việc này đã bắt đầu nhưng chưa hoàn tất (README.md bị lỗi ghi đè, requirements.txt và test_design.md chưa được viết lại).
+- `README.md`, `requirements.txt`, `docs/test_design.md` — **cần cập nhật lại theo Nhóm D bên dưới**, việc này đã bắt đầu nhưng chưa hoàn tất.
 
 ---
 
